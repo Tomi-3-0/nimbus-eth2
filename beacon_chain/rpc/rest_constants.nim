@@ -271,3 +271,5 @@ const
     "Unable to load state for parent block, database corrupt?"
   RewardOverflowError* =
     "Reward value overflow"
+  HistoricalSummariesUnavailable* =
+    "Historical summaries unavailable"
