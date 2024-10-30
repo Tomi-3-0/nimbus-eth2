@@ -1303,6 +1303,10 @@ proc addFuluMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
   node.addElectraMessageHandlers(forkDigest, slot)
 
+proc addFuluMessageHandlers(
+    node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
+  node.addElectraMessageHandlers(forkDigest, slot)
+
 proc removeAltairMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.removePhase0MessageHandlers(forkDigest)
 
@@ -1331,6 +1335,9 @@ proc removeDenebMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
 proc removeElectraMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.doRemoveDenebMessageHandlers(
     forkDigest, node.dag.cfg.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA)
+
+proc removeFuluMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
+  node.removeElectraMessageHandlers(forkDigest)
 
 proc removeFuluMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.removeElectraMessageHandlers(forkDigest)

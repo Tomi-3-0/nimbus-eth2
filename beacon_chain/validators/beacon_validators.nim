@@ -713,6 +713,30 @@ func constructSignableBlindedBlock[T:
 
   blindedBlock
 
+func constructPlainBlindedBlock[T: fulu_mev.BlindedBeaconBlock](
+    blck: ForkyBeaconBlock,
+    blindedBundle: fulu_mev.BlindedExecutionPayloadAndBlobsBundle): T =
+  # https://github.com/nim-lang/Nim/issues/23020 workaround
+  static: doAssert T is fulu_mev.BlindedBeaconBlock
+
+  const
+    blckFields = getFieldNames(typeof(blck))
+    blckBodyFields = getFieldNames(typeof(blck.body))
+
+  var blindedBlock: T
+
+  # https://github.com/ethereum/builder-specs/blob/v0.4.0/specs/bellatrix/validator.md#block-proposal
+  copyFields(blindedBlock, blck, blckFields)
+  copyFields(blindedBlock.body, blck.body, blckBodyFields)
+  assign(
+    blindedBlock.body.execution_payload_header,
+    blindedBundle.execution_payload_header)
+  assign(
+    blindedBlock.body.blob_kzg_commitments,
+    blindedBundle.blob_kzg_commitments)
+
+  blindedBlock
+
 proc blindedBlockCheckSlashingAndSign[
     T: electra_mev.SignedBlindedBeaconBlock |
        fulu_mev.SignedBlindedBeaconBlock](
