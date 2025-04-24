@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2024-2025 Status Research & Development GmbH
+# Copyright (c) 2023-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -25,7 +25,7 @@ proc registerValidator*(body: seq[SignedValidatorRegistrationV1]
   ## https://github.com/ethereum/builder-specs/blob/v0.4.0/apis/builder/validators.yaml
   ## https://github.com/ethereum/beacon-APIs/blob/v2.3.0/apis/validator/register_validator.yaml
 
-proc getHeaderElectraPlain*(
+proc getHeaderDenebPlain*(
     slot: Slot,
     parent_hash: Eth2Digest,
     pubkey: ValidatorPubKey
@@ -34,7 +34,7 @@ proc getHeaderElectraPlain*(
   meth: MethodGet, connection: {Dedicated, Close}.}
   ## https://github.com/ethereum/builder-specs/blob/v0.4.0/apis/builder/header.yaml
 
-proc getHeaderElectra*(
+proc getHeaderDeneb*(
     client: RestClientRef,
     slot: Slot,
     parent_hash: Eth2Digest,
@@ -42,21 +42,21 @@ proc getHeaderElectra*(
 ): Future[RestPlainResponse] {.
   async: (raises: [CancelledError, RestEncodingError, RestDnsResolveError,
                    RestCommunicationError], raw: true).} =
-  client.getHeaderElectraPlain(
+  client.getHeaderDenebPlain(
     slot, parent_hash, pubkey,
     restAcceptType = "application/octet-stream,application/json;q=0.5",
   )
 
 proc submitBlindedBlockPlain*(
-    body: electra_mev.SignedBlindedBeaconBlock
+    body: deneb_mev.SignedBlindedBeaconBlock
 ): RestPlainResponse {.
   rest, endpoint: "/eth/v1/builder/blinded_blocks",
   meth: MethodPost, connection: {Dedicated, Close}.}
   ## https://github.com/ethereum/builder-specs/blob/v0.4.0/apis/builder/blinded_blocks.yaml
 
 proc submitBlindedBlock*(
-    client: RestClientRef,
-    body: electra_mev.SignedBlindedBeaconBlock
+  client: RestClientRef,
+  body: deneb_mev.SignedBlindedBeaconBlock
 ): Future[RestPlainResponse] {.
   async: (raises: [CancelledError, RestEncodingError, RestDnsResolveError,
                    RestCommunicationError], raw: true).} =
@@ -64,5 +64,5 @@ proc submitBlindedBlock*(
   client.submitBlindedBlockPlain(
     body,
     restAcceptType = "application/octet-stream,application/json;q=0.5",
-    extraHeaders = @[("eth-consensus-version", toString(ConsensusFork.Electra))]
+    extraHeaders = @[("eth-consensus-version", toString(ConsensusFork.Deneb))]
   )

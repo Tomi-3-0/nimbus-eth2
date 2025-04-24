@@ -1289,6 +1289,13 @@ proc doAddDenebMessageHandlers(
   for topic in blobSidecarTopics(forkDigest, blobSidecarSubnetCount):
     node.network.subscribe(topic, basicParams())
 
+proc doAddDenebMessageHandlers(
+    node: BeaconNode, forkDigest: ForkDigest, slot: Slot,
+    blobSidecarSubnetCount: uint64) =
+  node.addCapellaMessageHandlers(forkDigest, slot)
+  for topic in blobSidecarTopics(forkDigest, blobSidecarSubnetCount):
+    node.network.subscribe(topic, basicParams)
+
 proc addDenebMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
   node.doAddDenebMessageHandlers(

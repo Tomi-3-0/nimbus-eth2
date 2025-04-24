@@ -441,7 +441,9 @@ template kind*(
       deneb.SigVerifiedSignedBeaconBlock |
       deneb.MsgTrustedSignedBeaconBlock |
       deneb.TrustedSignedBeaconBlock |
-      deneb_mev.SignedBlindedBeaconBlock]): ConsensusFork =
+      deneb_mev.SignedBlindedBeaconBlock |
+      deneb_mev.SignedBuilderBid |
+      deneb_mev.ExecutionPayloadAndBlobsBundle]): ConsensusFork =
   ConsensusFork.Deneb
 
 template kind*(
