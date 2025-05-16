@@ -622,16 +622,9 @@ proc requestManagerDataColumnLoop(
     if missingColumnIds.len == 0:
       continue
 
-<<<<<<< HEAD
     var columnIds: seq[DataColumnsByRootIdentifier]
     if rman.dataColumnLoader == nil:
       columnIds = missingColumnIds
-=======
-    var columnIds: seq[DataColumnIdentifier]
-    if rman.dataColumnLoader == nil:
-      for item in missingColumnIds:
-        columnIds.add item
->>>>>>> f14f935b8 (Rebase Fulu onto unstable (#7070))
     else:
       var
         blockRoots: seq[Eth2Digest]
@@ -640,7 +633,6 @@ proc requestManagerDataColumnLoop(
         if columnId.block_root != curRoot:
           curRoot = columnId.block_root
           blockRoots.add curRoot
-<<<<<<< HEAD
         for index in columnId.indices:
           let loaderElem = DataColumnIdentifier(
             block_root: columnId.block_root,
@@ -653,16 +645,6 @@ proc requestManagerDataColumnLoop(
             continue
           debug "Loaded orphaned data columns from storage", columnId
           rman.dataColumnQuarantine[].put(data_column_sidecar)
-=======
-        let data_column_sidecar = rman.dataColumnLoader(columnId).valueOr:
-          columnIds.add columnId
-          if blockRoots.len > 0 and blockRoots[^1] == curRoot:
-            # A data column is missing, remove from list of fully available data columns
-            discard blockRoots.pop()
-          continue
-        debug "Loaded orphaned data columns from storage", columnId
-        rman.dataColumnQuarantine[].put(data_column_sidecar)
->>>>>>> f14f935b8 (Rebase Fulu onto unstable (#7070))
       var verifiers = newSeqOfCap[
         Future[Result[void, VerifierError]]
           .Raising([CancelledError])](blockRoots.len)

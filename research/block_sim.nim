@@ -33,9 +33,6 @@ from ../beacon_chain/consensus_object_pools/block_quarantine import
 from ../beacon_chain/consensus_object_pools/sync_committee_msg_pool import
   SyncCommitteeMsgPool, addContribution, addSyncCommitteeMessage, init,
   produceContribution, produceSyncAggregate, pruneData
-from ../beacon_chain/el/eth1_chain import
-  Eth1Block, Eth1BlockNumber, Eth1BlockTimestamp, Eth1Chain, addBlock,
-  getBlockProposalData, init
 from ../beacon_chain/spec/beaconstate import
   get_beacon_committee, get_beacon_proposer_index,
   get_committee_count_per_slot, get_committee_indices

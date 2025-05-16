@@ -1289,13 +1289,6 @@ proc doAddDenebMessageHandlers(
   for topic in blobSidecarTopics(forkDigest, blobSidecarSubnetCount):
     node.network.subscribe(topic, basicParams())
 
-proc doAddDenebMessageHandlers(
-    node: BeaconNode, forkDigest: ForkDigest, slot: Slot,
-    blobSidecarSubnetCount: uint64) =
-  node.addCapellaMessageHandlers(forkDigest, slot)
-  for topic in blobSidecarTopics(forkDigest, blobSidecarSubnetCount):
-    node.network.subscribe(topic, basicParams)
-
 proc addDenebMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
   node.doAddDenebMessageHandlers(
@@ -1305,10 +1298,6 @@ proc addElectraMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
   node.doAddDenebMessageHandlers(
     forkDigest, slot, node.dag.cfg.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA)
-
-proc addFuluMessageHandlers(
-    node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
-  node.addElectraMessageHandlers(forkDigest, slot)
 
 proc addFuluMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
@@ -1342,9 +1331,6 @@ proc removeDenebMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
 proc removeElectraMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.doRemoveDenebMessageHandlers(
     forkDigest, node.dag.cfg.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA)
-
-proc removeFuluMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
-  node.removeElectraMessageHandlers(forkDigest)
 
 proc removeFuluMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.removeElectraMessageHandlers(forkDigest)
