@@ -936,7 +936,7 @@ func get_base_reward_per_increment*(
     integer_squareroot(distinctBase(total_active_balance)))
 
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.4/specs/altair/beacon-chain.md#get_base_reward
-func get_base_reward(
+func get_base_reward*(
     state: altair.BeaconState | bellatrix.BeaconState | capella.BeaconState |
            deneb.BeaconState | electra.BeaconState | fulu.BeaconState,
     index: ValidatorIndex, base_reward_per_increment: Gwei): Gwei =
@@ -2280,7 +2280,7 @@ func upgrade_to_fulu*(
       block_hash: pre.latest_execution_payload_header.block_hash,
       gas_limit: 0.uint64,
       builder_index: 0.uint64,
-      slot: 0.Slot,
+      slot: pre.slot,
       value: 0.Gwei,
       blob_kzg_commitments_root: Eth2Digest())
 
@@ -2356,9 +2356,9 @@ func upgrade_to_fulu*(
     pending_partial_withdrawals: pre.pending_partial_withdrawals,
     pending_consolidations: pre.pending_consolidations,
     # [New fields in EIP7732]
-    latest_block_hash: Eth2Digest(),  # Initialize missing field
-    latest_full_slot: Slot(0),  # Initialize missing field
-    latest_withdrawals_root: Eth2Digest()  # Initialize missing field
+    latest_block_hash: pre.latest_execution_payload_header.block_hash,
+    latest_full_slot: pre.slot,
+    latest_withdrawals_root: Eth2Digest()
   )
 
   post

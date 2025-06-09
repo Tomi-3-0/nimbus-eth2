@@ -470,7 +470,7 @@ func partialBeaconBlock*(
 
   let executionPayloadHeader = fulu.ExecutionPayloadHeader(
     parent_block_hash: execution_payload.executionPayload.parent_hash,
-    parent_block_root: state.data.latest_block_header.parent_root,
+    parent_block_root: state.latest_block_root,
     block_hash: execution_payload.executionPayload.block_hash,
     gas_limit: execution_payload.executionPayload.gas_limit,
     builder_index: proposer_index.uint64,

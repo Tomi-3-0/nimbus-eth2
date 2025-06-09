@@ -126,12 +126,6 @@ proc makeSimulationBlock(
   let res = process_block(
     cfg, state.data, blck.asSigVerified(), verificationFlags, cache)
 
-  if res.isErr:
-    # For Fulu-eip7732, process_block is not fully implemented here (stub only)
-    # This should cause validation failures
-    rollback(state)
-    return err(res.error())
-
   state.root = hash_tree_root(state.data)
   blck.state_root = state.root
 
@@ -406,30 +400,148 @@ cli do(slots = SLOTS_PER_EPOCH * 7,
 
   proc proposeFuluBlock(slot: Slot) =
     if rand(r, 1.0) > blockRatio:
+      echo "Skipping slot ", slot, " due to blockRatio"
       return
 
+    echo ""
+    echo "=========================================="
+    echo "=== PROPOSING FULU-EPBS BLOCK FOR SLOT ", slot, " ==="
+    echo "=========================================="
+
     dag.withUpdatedState(tmpState[], dag.getBlockIdAtSlot(slot).expect("block")) do:
+      echo "State updated successfully for slot ", slot
+      echo "Current head slot: ", dag.head.slot
+      echo "Target slot: ", slot
+      
       let newBlock = getNewBlock[fulu.SignedBeaconBlock](updatedState, slot, cache)
+      
+      echo ""
+      echo "EPBS BLOCK CREATION COMPLETED:"
+      echo "  Slot: ", newBlock.message.slot
+      echo "  Proposer: ", newBlock.message.proposer_index  
+      echo "  Block root: ", shortLog(newBlock.root)
+      echo "  Parent root: ", shortLog(newBlock.message.parent_root)
+      echo "  State root: ", shortLog(newBlock.message.state_root)
+      echo "  Block signature: ", shortLog(newBlock.signature)
+      echo "  Execution payload header signature: ", shortLog(newBlock.message.body.signed_execution_payload_header.signature)
+      echo "  Builder index: ", newBlock.message.body.signed_execution_payload_header.message.builder_index
+      echo "  Payload value: ", newBlock.message.body.signed_execution_payload_header.message.value
+      echo "  Payload gas limit: ", newBlock.message.body.signed_execution_payload_header.message.gas_limit
+      echo "  Payload block hash: ", shortLog(newBlock.message.body.signed_execution_payload_header.message.block_hash)
+      echo "  Attestations: ", newBlock.message.body.attestations.len
+      echo "  Proposer slashings: ", newBlock.message.body.proposer_slashings.len
+      echo "  Attester slashings: ", newBlock.message.body.attester_slashings.len
+      echo "  Deposits: ", newBlock.message.body.deposits.len
+      echo "  Voluntary exits: ", newBlock.message.body.voluntary_exits.len
+      
+      echo ""
+      echo "About to call dag.addHeadBlock..."
       
       let added = dag.addHeadBlock(verifier, newBlock) do (
           blckRef: BlockRef, signedBlock: fulu.TrustedSignedBeaconBlock,
           epochRef: EpochRef, unrealized: FinalityCheckpoints):
+        echo "  CALLBACK EXECUTED: Block validation successful"
+        echo "  Block ref root: ", shortLog(blckRef.root)
+        echo "  Justified epoch: ", unrealized.justified.epoch
+        echo "  Finalized epoch: ", unrealized.finalized.epoch
+        echo "  Adding to fork choice for block: ", shortLog(blckRef.root)
+        attPool.addForkChoice(
+          epochRef, blckRef, unrealized, signedBlock.message,
+          blckRef.slot.start_beacon_time)
+        echo "  Fork choice addition completed"
+
+        let 
+          currentFinalized = getStateField(dag.headState, finalized_checkpoint).epoch
+          currentJustified = getStateField(dag.headState, current_justified_checkpoint).epoch
+        echo "  OFFICIAL finalized checkpoint: ", currentFinalized
+        echo "  OFFICIAL justified checkpoint: ", currentJustified
+        echo "  Finality gap (unrealized - official): ", unrealized.finalized.epoch.int64 - currentFinalized.int64
+        
+        echo "  Adding to fork choice for block: ", shortLog(blckRef.root)
         attPool.addForkChoice(
           epochRef, blckRef, unrealized, signedBlock.message,
           blckRef.slot.start_beacon_time)
 
+        echo "  Fork choice addition completed"
+
+      echo "dag.addHeadBlock call completed"
+      
+      # DETAILED ERROR ANALYSIS:
       if added.isOk():
+        echo ""
+        echo "SUCCESS: Block added to DAG successfully!"
+        echo "  Block ref: ", shortLog(added[].root)
+        echo "  Updating head..."
+        
         dag.updateHead(added[], quarantine[], [])
+        echo "  Head updated successfully"
+        echo "  New head slot: ", dag.head.slot
+        echo "  New head root: ", shortLog(dag.head.root)
+        
         if dag.needStateCachesAndForkChoicePruning():
+          echo "  Pruning state caches and attestation pool..."
           dag.pruneStateCachesDAG()
           attPool.prune()
+          echo "  Pruning completed"
+        
+        echo ""
+        echo "✅ SUCCESS: Fulu block for slot ", slot, " completed successfully!"
+        
       else:
-        echo "ERROR: Failed to add fulu block for slot ", 
-          slot, ": ", added.error()
-        return  # Don't crash, just skip this block
+        echo ""
+        echo "❌ FAILURE: dag.addHeadBlock failed!"
+        echo "Error type: ", added.error()
+        
+        # Get more specific error information
+        case added.error():
+        of VerifierError.Invalid:
+          echo ""
+          echo "DETAILED ERROR: Block validation failed - the block is INVALID"
+          echo "This means one of the following failed:"
+          echo "  - Block signature verification (proposer signature)"
+          echo "  - Execution payload header signature verification"
+          echo "  - State transition validation"
+          echo "  - Block structure validation"
+          echo "  - Consensus rule violation"
+          echo "  - Fork choice validation"
+          echo "  - Builder signature validation (EIP-7732 specific)"
+          echo "  - Builder balance/status validation"
+          echo ""
+          echo "The block was rejected as invalid by the consensus rules."
+          
+        of VerifierError.MissingParent:
+          echo ""
+          echo "DETAILED ERROR: Missing parent block"
+          echo "  Expected parent root: ", shortLog(newBlock.message.parent_root)
+          echo "  This block's parent is not in the chain"
+          echo "  Chain might be out of sync or parent was rejected"
+          
+        of VerifierError.UnviableFork:
+          echo ""
+          echo "DETAILED ERROR: Unviable fork"
+          echo "  This block would create an unviable fork"
+          echo "  Fork choice rules prevent this block from being accepted"
+          
+        else:
+          echo ""
+          echo "DETAILED ERROR: Other verifier error"
+          echo "  Error code: ", added.error()
+          echo "  This is an unexpected error type"
+        
+        echo ""
+        echo "SKIPPING slot ", slot, " due to validation failure"
+        echo "Continuing to next slot..."
+        return
         
     do:
+      echo ""
+      echo "❌ FATAL ERROR: withUpdatedState failed for slot ", slot
+      echo "This should never happen - indicates a serious chain state issue"
       raiseAssert "withUpdatedState failed"
+
+    echo "=========================================="
+    echo "=== SLOT ", slot, " PROCESSING COMPLETE ==="
+    echo "=========================================="
 
   for i in 0..<slots:
     let

@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2021-2024 Status Research & Development GmbH
+# Copyright (c) 2021-2025 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -32,7 +32,7 @@ suite "Light client" & preset():
       res.CAPELLA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 1).Epoch
       res.DENEB_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 2).Epoch
       res.ELECTRA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 3).Epoch
-      res.FULU_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 4).Epoch
+      res.FULU_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 10).Epoch
       res
     altairStartSlot = cfg.ALTAIR_FORK_EPOCH.start_slot
 

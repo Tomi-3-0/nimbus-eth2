@@ -242,6 +242,7 @@ type
     slot*: Slot
     blob_kzg_commitments*: 
       List[KzgCommitment, Limit MAX_BLOB_COMMITMENTS_PER_BLOCK]
+    payload_withheld*: bool
     state_root*: Eth2Digest
 
   # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#signedexecutionpayloadenvelope

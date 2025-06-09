@@ -180,3 +180,99 @@ func is_parent_block_full*(state: fulu.BeaconState): bool =
 #   return state.latest_execution_payload_header.block_hash ==
 #       state.latest_block_hash
   return true # this is a placeholder
+
+func get_payload_proposer_reward*(reward_numerator: Gwei): Gwei =
+  const proposer_reward_denominator = 
+    (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR div PROPOSER_WEIGHT
+  Gwei(reward_numerator.uint64 div proposer_reward_denominator)
+
+func get_payload_proposer_penalty*(penalty_numerator: Gwei): Gwei =
+  const proposer_reward_denominator = 
+    (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR div PROPOSER_WEIGHT
+  Gwei(2 * penalty_numerator.uint64 div proposer_reward_denominator)
+
+# https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.4/specs/_features/eip7732/beacon-chain.md#process_payload_attestation
+proc process_payload_attestation*(
+   state: var fulu.BeaconState,
+   payload_attestation: PayloadAttestation,
+   cache: var StateCache): Result[void, cstring] =
+ 
+ # Check that the attestation is for the parent beacon block
+ let data = payload_attestation.data
+ if not (data.beacon_block_root == state.latest_block_header.parent_root):
+   return err("process_payload_attestation: beacon block and latest block mismatch")
+ 
+ # Check that the attestation is for the previous slot
+ if data.slot + 1 != state.slot:
+   return err("process_payload_attestation: slot mismatch")
+
+ info "Processing payload attestation", 
+  slot = data.slot,
+  current_slot = state.slot,
+  payload_status = data.payload_status,
+  beacon_block_root = shortLog(data.beacon_block_root)
+ 
+ 
+ # Verify signature
+ let indexed_payload_attestation = 
+   get_indexed_payload_attestation(
+    state, data.slot, payload_attestation, cache)
+ if not is_valid_indexed_payload_attestation(
+  state, indexed_payload_attestation):
+   return err("process_payload_attestation: signature verification failed")
+ 
+ # Determine epoch participation
+ let epoch_participation =
+   if state.slot mod SLOTS_PER_EPOCH == 0:
+     addr state.previous_epoch_participation
+   else:
+     addr state.current_epoch_participation
+ 
+ # Check payload status
+ let 
+   payload_was_present = data.slot == state.latest_full_slot
+   voted_present = data.payload_status == uint8(PAYLOAD_PRESENT)
+
+ info "Payload attestation status check",
+  payload_was_present = payload_was_present,
+  voted_present = voted_present,
+  latest_full_slot = state.latest_full_slot,
+  matches = (voted_present == payload_was_present)
+ 
+ let 
+   proposer_index = get_beacon_proposer_index(state, cache).valueOr:
+     return err("process_payload_attestation: no proposer")
+   total_active_balance = get_total_active_balance(state, cache)
+   base_reward_per_increment = get_base_reward_per_increment(total_active_balance)
+ 
+ if voted_present != payload_was_present:
+   # Unset flags and calculate penalties for incorrect attestation
+   var proposer_penalty_numerator = 0.Gwei
+   for index in indexed_payload_attestation.attesting_indices:
+     for flag_index, weight in PARTICIPATION_FLAG_WEIGHTS:
+       if has_flag(epoch_participation[][index], flag_index):
+         asList(epoch_participation[])[index] = 
+           remove_flag(epoch_participation[][index], flag_index)
+         proposer_penalty_numerator += 
+           get_base_reward(state, index, base_reward_per_increment) * weight.uint64
+   
+   # Penalize proposer
+   let proposer_penalty = get_payload_proposer_penalty(proposer_penalty_numerator)
+   decrease_balance(state, proposer_index, proposer_penalty)
+   return ok()
+ 
+ # Set flags and calculate rewards for correct attestation
+ var proposer_reward_numerator = 0.Gwei
+ for index in indexed_payload_attestation.attesting_indices:
+   for flag_index, weight in PARTICIPATION_FLAG_WEIGHTS:
+     if not has_flag(epoch_participation[][index], flag_index):
+       asList(epoch_participation[])[index] = 
+         add_flag(epoch_participation[][index], flag_index)
+       proposer_reward_numerator += 
+         get_base_reward(state, index, base_reward_per_increment) * weight.uint64
+ 
+ # Reward proposer
+ let proposer_reward = get_payload_proposer_reward(proposer_reward_numerator)
+ increase_balance(state, proposer_index, proposer_reward)
+ 
+ ok()
