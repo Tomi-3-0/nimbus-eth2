@@ -8,6 +8,7 @@
 {.push raises: [].}
 
 import
+  chronicles,
   "."/[forks, validator],
   ./datatypes/fulu,
   "."/[
@@ -15,6 +16,7 @@ import
   state_transition_epoch],
   bitops
 import std/[lists, sequtils]
+import stew/bitops2
 
 func bit_length(n: SomeInteger): SomeInteger =
   # Returns the number of bits required to represent `n`.
@@ -212,7 +214,6 @@ proc process_payload_attestation*(
   payload_status = data.payload_status,
   beacon_block_root = shortLog(data.beacon_block_root)
  
- 
  # Verify signature
  let indexed_payload_attestation = 
    get_indexed_payload_attestation(
@@ -276,3 +277,116 @@ proc process_payload_attestation*(
  increase_balance(state, proposer_index, proposer_reward)
  
  ok()
+
+func kzg_commitment_inclusion_proof_gindex_eip7732*(
+   blob_index: uint64): GeneralizedIndex =
+  
+  let 
+    depth = log2trunc(nextPow2(MAX_BLOB_COMMITMENTS_PER_BLOCK))
+    inner_gindex = GeneralizedIndex((1'u64 shl depth) + blob_index)
+  
+  const
+    SIGNED_EXECUTION_PAYLOAD_HEADER_GINDEX = GeneralizedIndex(26)
+    
+    MESSAGE_GINDEX = GeneralizedIndex(2)
+    
+    BLOB_KZG_COMMITMENTS_ROOT_GINDEX = GeneralizedIndex(15)
+  
+  # Concatenate all indices in one go
+  result = GeneralizedIndex(1)
+  let indices = [SIGNED_EXECUTION_PAYLOAD_HEADER_GINDEX, MESSAGE_GINDEX, 
+                  BLOB_KZG_COMMITMENTS_ROOT_GINDEX, inner_gindex]
+  
+  for i in indices:
+    let floor = GeneralizedIndex(bit_floor(uint64(i)))
+    result = GeneralizedIndex(result * floor + (i - floor))
+
+# https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/p2p-interface.md#modified-verify_blob_sidecar_inclusion_proof  
+func verify_blob_sidecar_inclusion_proof_eip7732*(
+    blob_sidecar: BlobSidecarEIP7732): Result[void, string] =
+  # This handles the case where blob_kzg_commitments_root is in the execution payload header
+  let gindex = kzg_commitment_inclusion_proof_gindex_eip7732(blob_sidecar.index)
+  
+  if not is_valid_merkle_branch(
+      hash_tree_root(blob_sidecar.kzg_commitment),
+      blob_sidecar.kzg_commitment_inclusion_proof,
+      KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732,
+      get_subtree_index(gindex),
+      blob_sidecar.signed_block_header.message.body_root):
+    return err("BlobSidecar: inclusion proof not valid (EIP-7732)")
+  
+  ok()
+
+# https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/builder.md#constructing-the-blobsidecars
+func create_blob_sidecars*(
+    forkyBlck: fulu.SignedBeaconBlock,
+    blobs: Blobs,
+    blob_kzg_commitments: List[KzgCommitment, Limit MAX_BLOB_COMMITMENTS_PER_BLOCK],
+    blob_kzg_proofs: KzgProofs): seq[BlobSidecarEIP7732] =
+  ## Create blob sidecars for EIP-7732 where KZG commitments come from the builder
+  ## via ExecutionPayloadEnvelope rather than being in the beacon block
+  
+  doAssert blobs.len == blob_kzg_proofs.len
+  doAssert blobs.len == blob_kzg_commitments.len
+  doAssert blobs.len <= MAX_BLOB_COMMITMENTS_PER_BLOCK.int
+
+  var res = newSeqOfCap[BlobSidecarEIP7732](blobs.len)
+  let signedBlockHeader = forkyBlck.toSignedBeaconBlockHeader()
+  
+  for i in 0 ..< blobs.lenu64:
+    # construct inclusion proof as concatenation of two proofs
+    
+    # 1: Proof from blob_kzg_commitments[i] to blob_kzg_commitments root
+    const BLOB_LIST_DEPTH = 
+      log2trunc(nextPow2(MAX_BLOB_COMMITMENTS_PER_BLOCK))
+    let blob_list_gindex = GeneralizedIndex((1'u64 shl BLOB_LIST_DEPTH) + i)
+    
+    let 
+      commitment_proof_result = 
+        blob_kzg_commitments.build_proof(blob_list_gindex)
+      commitment_proof = 
+        commitment_proof_result.expect("Valid blob index for commitment proof")
+    
+    const
+      SIGNED_EXECUTION_PAYLOAD_HEADER_GINDEX = 26.GeneralizedIndex
+      MESSAGE_GINDEX = 2.GeneralizedIndex
+      BLOB_KZG_COMMITMENTS_ROOT_GINDEX = 15.GeneralizedIndex
+    
+    var body_gindex = 1.GeneralizedIndex
+    let indices = [SIGNED_EXECUTION_PAYLOAD_HEADER_GINDEX, MESSAGE_GINDEX, 
+                   BLOB_KZG_COMMITMENTS_ROOT_GINDEX]
+    
+    for idx in indices:
+      let floor = GeneralizedIndex(bit_floor(uint64(idx)))
+      body_gindex = GeneralizedIndex(body_gindex * floor + (idx - floor))
+    
+    let 
+      body_proof_result = forkyBlck.message.body.build_proof(body_gindex)
+      body_proof = 
+        body_proof_result.expect("Valid body gindex")
+    
+    var inclusion_proof: 
+      array[KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732, Eth2Digest]
+    let total_proof_len = commitment_proof.len + body_proof.len
+    
+    doAssert total_proof_len == KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732,
+      "Combined proof length mismatch: got " & $total_proof_len & 
+      ", expected " & $KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732
+    
+    for j in 0 ..< commitment_proof.len:
+      inclusion_proof[j] = commitment_proof[j]
+    
+    for j in 0 ..< body_proof.len:
+      inclusion_proof[commitment_proof.len + j] = body_proof[j]
+    
+    var sidecar = BlobSidecarEIP7732(
+      index: i,
+      blob: blobs[i],
+      kzg_commitment: blob_kzg_commitments[i],
+      kzg_proof: blob_kzg_proofs[i],
+      signed_block_header: signedBlockHeader,
+      kzg_commitment_inclusion_proof: inclusion_proof)
+    
+    res.add(sidecar)
+  
+  res

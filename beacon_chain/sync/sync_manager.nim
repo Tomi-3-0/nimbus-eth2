@@ -263,10 +263,7 @@ func groupBlobs*(
     blob_cursor = 0
   for block_idx, blck in blocks:
     withBlck(blck[]):
-      when consensusFork >= ConsensusFork.Fulu:
-        # Skip blob processing for epbs beacon blocks as they do not contain blobs
-        continue
-      elif consensusFork >= ConsensusFork.Deneb and 
+      when consensusFork >= ConsensusFork.Deneb and 
         consensusFork < ConsensusFork.Fulu:
         template kzgs: untyped = forkyBlck.message.body.blob_kzg_commitments
         if kzgs.len == 0:
@@ -287,6 +284,8 @@ func groupBlobs*(
             return err("BlobSidecar: unexpected signed_block_header")
           grouped[block_idx].add(blob_sidecar)
           inc blob_cursor
+      else:
+        continue
 
   if blob_cursor != len(blobs):
     # we reached end of blocks without consuming all blobs so either
@@ -295,6 +294,46 @@ func groupBlobs*(
     Result[seq[BlobSidecars], string].err "invalid block or blob sequence"
   else:
     Result[seq[BlobSidecars], string].ok grouped
+
+func groupBlobs*(
+    blocks: openArray[ref ForkedSignedBeaconBlock],
+    blobs: openArray[ref BlobSidecarEIP7732]
+): Result[seq[seq[ref BlobSidecarEIP7732]], string] =
+  var
+    grouped = newSeq[seq[ref BlobSidecarEIP7732]](len(blocks))
+    blob_cursor = 0
+    
+  for block_idx, blck in blocks:
+    withBlck(blck[]):
+      when consensusFork == ConsensusFork.Fulu:
+        # Count blobs for this slot
+        var blob_count = 0
+        for i in blob_cursor ..< blobs.len:
+          if blobs[i].signed_block_header.message.slot != forkyBlck.message.slot:
+            break
+          inc blob_count
+        
+        # Validate and group
+        let header = forkyBlck.toSignedBeaconBlockHeader()
+        for i in 0 ..< blob_count:
+          if blob_cursor >= blobs.len:
+            return err("BlobSidecar: response too short")
+            
+          let blob_sidecar = blobs[blob_cursor]
+          if blob_sidecar.index != BlobIndex(i):
+            return err("BlobSidecar: unexpected index")
+          if blob_sidecar.signed_block_header != header:
+            return err("BlobSidecar: unexpected signed_block_header")
+          
+          grouped[block_idx].add(blob_sidecar)
+          inc blob_cursor
+      else:
+        continue
+
+  if blob_cursor != len(blobs):
+    Result[seq[seq[ref BlobSidecarEIP7732]], string].err "invalid block or blob sequence"
+  else:
+    Result[seq[seq[ref BlobSidecarEIP7732]], string].ok grouped
 
 func checkBlobs(blobs: seq[BlobSidecars]): Result[void, string] =
   for blob_sidecars in blobs:

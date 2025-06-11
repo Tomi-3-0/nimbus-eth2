@@ -17,6 +17,7 @@
 
 import
   std/[sequtils, typetraits],
+  stew/bitops2,
   "."/[phase0, base, electra],
   chronicles,
   json_serialization,
@@ -26,7 +27,6 @@ import
   kzg4844/[kzg, kzg_abi]
 
 from std/strutils import join
-from stew/bitops2 import log2trunc
 from ./altair import
   EpochParticipationFlags, InactivityScores, SyncAggregate, SyncCommittee,
   TrustedSyncAggregate, SyncnetBits, num_active_participants
@@ -53,7 +53,10 @@ const
 
   # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.10/specs/fulu/p2p-interface.md#preset
   KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH* = 4
-  KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH_GINDEX* = 27
+  KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH_GINDEX* = 27  
+  
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/p2p-interface.md#preset
+  KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732* = 20
 
   # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.10/specs/fulu/das-core.md#data-size
   NUMBER_OF_COLUMNS* = 128
@@ -152,6 +155,19 @@ type
     custody_group_count*: uint64
 
 type
+
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/p2p-interface.md#blobsidecar
+  BlobSidecarEIP7732* = object
+    index*: deneb.BlobIndex
+      ## Index of blob in block
+    blob*: deneb.Blob
+    kzg_commitment*: KzgCommitment
+    kzg_proof*: KzgProof
+      ## Allows for quick verification of kzg_commitment
+    signed_block_header*: SignedBeaconBlockHeader
+    kzg_commitment_inclusion_proof*:
+      array[KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732, Eth2Digest]
+  BlobSidecarsEIP7732* = seq[ref BlobSidecarEIP7732]
 
   # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#payloadattestationdata
     # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.7/specs/electra/beacon-chain.md#attestation

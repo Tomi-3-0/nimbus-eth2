@@ -466,7 +466,6 @@ cli do(slots = SLOTS_PER_EPOCH * 7,
 
       echo "dag.addHeadBlock call completed"
       
-      # DETAILED ERROR ANALYSIS:
       if added.isOk():
         echo ""
         echo "SUCCESS: Block added to DAG successfully!"
@@ -492,7 +491,6 @@ cli do(slots = SLOTS_PER_EPOCH * 7,
         echo "❌ FAILURE: dag.addHeadBlock failed!"
         echo "Error type: ", added.error()
         
-        # Get more specific error information
         case added.error():
         of VerifierError.Invalid:
           echo ""

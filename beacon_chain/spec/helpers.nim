@@ -215,7 +215,7 @@ func has_flag*(flags: ParticipationFlags, flag_index: TimelyFlag): bool =
 
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.8/specs/deneb/p2p-interface.md#verify_blob_sidecar_inclusion_proof
 func verify_blob_sidecar_inclusion_proof*(
-    blob_sidecar: BlobSidecar): Result[void, string] =
+    blob_sidecar: deneb.BlobSidecar): Result[void, string] =
   let gindex = kzg_commitment_inclusion_proof_gindex(blob_sidecar.index)
   if not is_valid_merkle_branch(
       hash_tree_root(blob_sidecar.kzg_commitment),
@@ -227,39 +227,28 @@ func verify_blob_sidecar_inclusion_proof*(
   ok()
 
 func create_blob_sidecars*(
-    forkyBlck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock |
-    fulu.SignedBeaconBlock,
+    forkyBlck: deneb.SignedBeaconBlock | electra.SignedBeaconBlock,
     kzg_proofs: KzgProofs,
-    blobs: Blobs): seq[BlobSidecar] =
-  
-  when compiles(forkyBlck.message.body.blob_kzg_commitments):
-    template kzg_commitments: untyped =
-      forkyBlck.message.body.blob_kzg_commitments
-    doAssert kzg_proofs.len == blobs.len
-    doAssert kzg_proofs.len == kzg_commitments.len
+    blobs: Blobs): seq[deneb.BlobSidecar] =
+  template kzg_commitments: untyped =
+    forkyBlck.message.body.blob_kzg_commitments
+  doAssert kzg_proofs.len == blobs.len
+  doAssert kzg_proofs.len == kzg_commitments.len
 
-    var res = newSeqOfCap[BlobSidecar](blobs.len)
-    let signedBlockHeader = forkyBlck.toSignedBeaconBlockHeader()
-    for i in 0 ..< blobs.lenu64:
-      var sidecar = BlobSidecar(
-        index: i,
-        blob: blobs[i],
-        kzg_commitment: kzg_commitments[i],
-        kzg_proof: kzg_proofs[i],
-        signed_block_header: signedBlockHeader)
-      forkyBlck.message.body.build_proof(
-        kzg_commitment_inclusion_proof_gindex(i),
-        sidecar.kzg_commitment_inclusion_proof).expect("Valid gindex")
-      res.add(sidecar)
-    res
-  else:
-    when forkyBlck is fulu.SignedBeaconBlock:
-      # EIP7732 blocks doesn;t contain blob side cars
-      newSeq[BlobSidecar](0)
-    else:
-      # This should never happen if all post capella non-Fulu forks have blob_kzg_commitments
-      {.error: "Unexpected fork without blob_kzg_commitments".}
-      newSeq[BlobSidecar](0)
+  var res = newSeqOfCap[BlobSidecar](blobs.len)
+  let signedBlockHeader = forkyBlck.toSignedBeaconBlockHeader()
+  for i in 0 ..< blobs.lenu64:
+    var sidecar = BlobSidecar(
+      index: i,
+      blob: blobs[i],
+      kzg_commitment: kzg_commitments[i],
+      kzg_proof: kzg_proofs[i],
+      signed_block_header: signedBlockHeader)
+    forkyBlck.message.body.build_proof(
+      kzg_commitment_inclusion_proof_gindex(i),
+      sidecar.kzg_commitment_inclusion_proof).expect("Valid gindex")
+    res.add(sidecar)
+  res
 
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.0/specs/altair/light-client/sync-protocol.md#is_sync_committee_update
 template is_sync_committee_update*(update: SomeForkyLightClientUpdate): bool =
