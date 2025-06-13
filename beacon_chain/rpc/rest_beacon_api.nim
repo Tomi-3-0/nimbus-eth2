@@ -15,7 +15,7 @@ import
   ./state_ttl_cache,
   ../beacon_node,
   ../consensus_object_pools/[blockchain_dag, spec_cache, validator_change_pool],
-  ../spec/[eth2_merkleization, forks, network, validator],
+  ../spec/[eth2_merkleization, forks, network, validator, eip7732_helpers],
   ../validators/message_router_mev
 
 from ../spec/mev/bellatrix_mev import toSignedBlindedBeaconBlock
@@ -888,58 +888,7 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
         node.dag.isFinalized(bid)
       )
 
-  # https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlock
-  router.api(MethodPost, "/eth/v1/beacon/blocks") do (
-    contentBody: Option[ContentBody]) -> RestApiResponse:
-    let res =
-      block:
-        if contentBody.isNone():
-          return RestApiResponse.jsonError(Http400, EmptyRequestBodyError)
-        let
-          body = contentBody.get()
-          currentEpochFork =
-            node.dag.cfg.consensusForkAtEpoch(node.currentSlot().epoch())
-          rawVersion = request.headers.getString("eth-consensus-version")
-
-          # The V1 endpoint doesn't require the version to be specified but the
-          # only fork which works is the current gossip fork. Either it can use
-          # and broadcast a block in that fork or that broadcast will not prove
-          # useful anyway, so allow it to fail at the decoding stage.
-          version =
-            if rawVersion == "":
-              currentEpochFork.toString
-            else:
-              rawVersion
-
-        let restBlock = decodeBody(
-          RestPublishedSignedBlockContents, body, version).valueOr:
-            return RestApiResponse.jsonError(error)
-
-        withForkyBlck(restBlock):
-          if restBlock.kind != node.dag.cfg.consensusForkAtEpoch(
-              forkyBlck.message.slot.epoch):
-            doAssert strictVerification notin node.dag.updateFlags
-            return RestApiResponse.jsonError(Http400, InvalidBlockObjectError)
-
-          when consensusFork >= ConsensusFork.Deneb:
-            await node.router.routeSignedBeaconBlock(
-              forkyBlck, Opt.some(
-                forkyBlck.create_blob_sidecars(kzg_proofs, blobs)),
-              checkValidator = true)
-          else:
-            await node.router.routeSignedBeaconBlock(
-              forkyBlck, Opt.none(seq[BlobSidecar]),
-              checkValidator = true)
-
-    if res.isErr():
-      return RestApiResponse.jsonError(
-        Http503, BeaconNodeInSyncError, $res.error)
-    if res.get().isNone():
-      return RestApiResponse.jsonError(Http202, BlockValidationError)
-
-    RestApiResponse.jsonMsgResponse(BlockValidationSuccess)
-
-  # https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlockV2
+# https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlockV2
   router.api(MethodPost, "/eth/v2/beacon/blocks") do (
     broadcast_validation: Option[BroadcastValidationType],
     contentBody: Option[ContentBody]) -> RestApiResponse:
@@ -970,24 +919,42 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
           restBlock = decodeBody(
             RestPublishedSignedBlockContents, body, version).valueOr:
               return RestApiResponse.jsonError(error)
-
         withForkyBlck(restBlock):
           # TODO (henridf): handle broadcast_validation flag
           if restBlock.kind != node.dag.cfg.consensusForkAtEpoch(
               forkyBlck.message.slot.epoch):
             doAssert strictVerification notin node.dag.updateFlags
             return RestApiResponse.jsonError(Http400, InvalidBlockObjectError)
-
-          when consensusFork >= ConsensusFork.Deneb:
+          
+          when consensusFork == ConsensusFork.Fulu:
+            var commitmentsList: KzgCommitments
+            for commitment in blob_kzg_commitments:
+              doAssert commitmentsList.add(commitment)
+            
+            let blobSidecarsEIP7732 = 
+              if blobs.len > 0:
+                create_blob_sidecars(
+                  forkyBlck,
+                  blobs,
+                  commitmentsList,
+                  kzg_proofs)
+              else:
+                newSeq[BlobSidecarEIP7732]()
+            
+            await node.router.routeSignedBeaconBlock(
+              forkyBlck, 
+              Opt.some(blobSidecarsEIP7732),
+              checkValidator = true)
+          elif consensusFork >= ConsensusFork.Deneb:
             await node.router.routeSignedBeaconBlock(
               forkyBlck, Opt.some(
                 forkyBlck.create_blob_sidecars(kzg_proofs, blobs)),
               checkValidator = true)
           else:
             await node.router.routeSignedBeaconBlock(
-              forkyBlck, Opt.none(seq[BlobSidecar]),
+              forkyBlck, Opt.none(seq[deneb.BlobSidecar]),
               checkValidator = true)
-
+              
     if res.isErr():
       return RestApiResponse.jsonError(
         Http503, BeaconNodeInSyncError, $res.error)

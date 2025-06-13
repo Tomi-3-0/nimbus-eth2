@@ -788,6 +788,22 @@ func shortLog*(v: ExecutionPayload): auto =
     excess_blob_gas: $(v.excess_blob_gas)
   )
 
+func shortLog*(v: BlobSidecarEIP7732): auto =
+  (
+    index: v.index,
+    blob: deneb.shortLog(v.blob),
+    bloblen: v.blob.len(),
+    block_header: shortLog(v.signed_block_header.message),
+    kzg_commitment: deneb.shortLog(v.kzg_commitment),
+    kzg_proof: deneb.shortLog(v.kzg_proof),
+  )
+
+func shortLog*(v: seq[BlobSidecarEIP7732]): auto =
+  "[" & v.mapIt(shortLog(it)).join(", ") & "]"
+
+func shortLog*(v: seq[ref BlobSidecarEIP7732]): auto =
+  "[" & v.mapIt(shortLog(it[])).join(", ") & "]"
+
 template asSigned*(
     x: SigVerifiedSignedBeaconBlock |
        MsgTrustedSignedBeaconBlock |

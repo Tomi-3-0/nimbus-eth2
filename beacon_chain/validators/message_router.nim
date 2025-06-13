@@ -11,7 +11,7 @@ import
   std/sequtils,
   chronicles,
   metrics,
-  ../spec/network,
+  ../spec/[network, eip7732_helpers],
   ../consensus_object_pools/spec_cache,
   ../gossip_processing/eth2_processor,
   ../networking/eth2_network,
@@ -113,7 +113,13 @@ proc routeSignedBeaconBlock*(
       return err($(res.error()[1]))
 
     when typeof(blck).kind == ConsensusFork.Fulu:
-      discard
+      # For Fulu blocks, blob validation is handled differently
+      # Actual blob validation happens in the EIP-7732 overload of this function
+      if blobsOpt.isSome and blobsOpt.get().len > 0:
+        warn "Fulu-epbs blocks should not have deneb-style blob sidecars",
+          blockRoot = shortLog(blck.root),
+          blck = shortLog(blck.message)
+        return err("Fulu-epbs blocks use EIP-7732 blob sidecars")
     elif typeof(blck).kind >= ConsensusFork.Deneb and
       typeof(blck).kind < ConsensusFork.Fulu:
       if blobsOpt.isSome:
@@ -197,6 +203,143 @@ proc routeSignedBeaconBlock*(
           signature = shortLog(blck.signature), err = added.error()
       ok(blockRef)
 
+
+  let blockRef = router[].dag.getBlockRef(blck.root)
+  if blockRef.isErr:
+    warn "Block finalised while waiting for block processor",
+      blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+      signature = shortLog(blck.signature)
+  ok(blockRef)
+
+proc routeSignedBeaconBlock*(
+    router: ref MessageRouter, blck: fulu.SignedBeaconBlock,
+    blobsOpt: Opt[seq[BlobSidecarEIP7732]], checkValidator: bool):
+    Future[RouteBlockResult] {.async: (raises: [CancelledError]).} =
+  ## Validate and broadcast beacon block with EIP-7732 blob sidecars
+  ## Returns the new Head when block is added successfully to dag, none when
+  ## block passes validation but is not added, and error otherwise
+  let wallTime = router[].getCurrentBeaconTime()
+
+  block:
+    let vindex = ValidatorIndex(blck.message.proposer_index)
+    if checkValidator and (vindex in router.processor.validatorPool[]):
+      warn "A validator client attempts to send a block from " &
+           "validator that is also manager by beacon node",
+           validator_index = vindex
+      return err("Block could not be sent from validator that is also " &
+                 "managed by the beacon node")
+
+  # Start with a quick gossip validation check
+  block:
+    let res = validateBeaconBlock(
+      router[].dag, router[].quarantine, blck, wallTime, {})
+
+    if not res.isGoodForSending():
+      warn "Block failed validation",
+        blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+        signature = shortLog(blck.signature), error = res.error()
+      return err($(res.error()[1]))
+
+  # For EIP-7732, blob validation is different
+  # Blobs come with their own KZG commitments from the execution layer
+  # We validate the inclusion proof instead of checking against block commitments
+  if blobsOpt.isSome:
+    let blobs = blobsOpt.get()
+    if blobs.len > 0:
+      # Validate each blob's inclusion proof
+      for blob in blobs:
+        let res = verify_blob_sidecar_inclusion_proof_eip7732(blob)
+        if res.isErr():
+          warn "EIP-7732 blob inclusion proof failed validation",
+            blockRoot = shortLog(blck.root),
+            blob = shortLog(blob),
+            blck = shortLog(blck.message),
+            signature = shortLog(blck.signature),
+            msg = res.error()
+          return err(res.error())
+
+      # Also validate the KZG proofs
+      let kzgRes = validate_blobs(
+        blobs.mapIt(it.kzg_commitment),
+        blobs.mapIt(KzgBlob(bytes: it.blob)),
+        blobs.mapIt(it.kzg_proof))
+      if kzgRes.isErr():
+        warn "EIP-7732 blobs failed KZG validation",
+          blockRoot = shortLog(blck.root),
+          blobs = shortLog(blobs),
+          blck = shortLog(blck.message),
+          signature = shortLog(blck.signature),
+          msg = kzgRes.error()
+        return err(kzgRes.error())
+
+  let
+    sendTime = router[].getCurrentBeaconTime()
+    delay = sendTime - blck.message.slot.block_deadline()
+
+  # Broadcast the block
+  let res = await router[].network.broadcastBeaconBlock(blck)
+
+  if res.isOk():
+    beacon_blocks_sent.inc()
+    beacon_blocks_sent_delay.observe(delay.toFloatSeconds())
+
+    notice "Block sent",
+      blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+      signature = shortLog(blck.signature), delay
+  else:
+    notice "Block not sent",
+      blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+      signature = shortLog(blck.signature), error = res.error()
+
+  # Broadcast EIP-7732 blob sidecars
+  var blobRefs = Opt.none(BlobSidecarsEIP7732)
+  if blobsOpt.isSome():
+    let blobs = blobsOpt.get()
+    var workers = newSeq[Future[SendResult]](blobs.len)
+    for i in 0..<blobs.lenu64:
+      let subnet_id = router[].processor[]
+        .dag.cfg.compute_subnet_for_blob_sidecar(
+          blobs[i].signed_block_header.message.slot, i)
+      workers[i] = router[].network.broadcastBlobSidecar(subnet_id, blobs[i])
+    let allres = await allFinished(workers)
+    for i in 0..<allres.len:
+      let res = allres[i]
+      doAssert res.finished()
+      if res.failed():
+        notice "EIP-7732 Blob not sent",
+          blob = shortLog(blobs[i]), error = res.error[]
+      else:
+        notice "EIP-7732 Blob sent", blob = shortLog(blobs[i])
+    blobRefs = Opt.some(blobs.mapIt(newClone(it)))
+
+  # Convert blobRefs for blockProcessor if needed
+  let denebBlobRefs = 
+    if blobRefs.isSome():
+      # For now, we might need to handle this differently
+      # as blockProcessor might expect deneb.BlobSidecar
+      # This is a temporary solution
+      Opt.none(BlobSidecars)
+    else:
+      Opt.none(BlobSidecars)
+
+  let added = await router[].blockProcessor[].addBlock(
+    MsgSource.api, ForkedSignedBeaconBlock.init(blck), denebBlobRefs)
+
+  # The boolean we return tells the caller whether the block was integrated
+  # into the chain
+  if added.isErr():
+    return if added.error() != VerifierError.Duplicate:
+      warn "Unable to add routed block to block pool",
+        blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+        signature = shortLog(blck.signature), err = added.error()
+      ok(Opt.none(BlockRef))
+    else:
+      let blockRef = router[].dag.getBlockRef(blck.root)
+      if blockRef.isErr:
+        warn "Unable to add routed duplicate block to block pool",
+          blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
+          signature = shortLog(blck.signature), err = added.error()
+      ok(blockRef)
 
   let blockRef = router[].dag.getBlockRef(blck.root)
   if blockRef.isErr:

@@ -28,8 +28,8 @@ import
 
   # Local modules
   ../spec/[
-    eth2_merkleization, forks, helpers, network, signatures, state_transition,
-    validator],
+    eth2_merkleization, forks, helpers, eip7732_helpers, network, signatures, 
+    state_transition, validator],
   ../consensus_object_pools/[
     spec_cache, blockchain_dag, block_clearance, attestation_pool,
     sync_committee_msg_pool, validator_change_pool, consensus_manager,
@@ -1228,20 +1228,52 @@ proc proposeBlockAux(
           res.get()
       signedBlock = consensusFork.SignedBeaconBlock(
         message: forkyBlck, signature: signature, root: blockRoot)
-      blobsOpt =
-        when consensusFork >= ConsensusFork.Deneb:
-          Opt.some(signedBlock.create_blob_sidecars(
-            engineBid.blobsBundle.proofs, engineBid.blobsBundle.blobs))
+
+    when consensusFork == ConsensusFork.Fulu:
+      # EIP-7732: blob commitments come from execution payload
+      let blobSidecarsEIP7732 = 
+        if engineBid.blobsBundle.commitments.len > 0:
+          var commitmentsList: KzgCommitments
+          for commitment in engineBid.blobsBundle.commitments:
+            doAssert commitmentsList.add(commitment)
+          
+          create_blob_sidecars(
+            signedBlock,
+            engineBid.blobsBundle.blobs,
+            commitmentsList,
+            engineBid.blobsBundle.proofs)
         else:
-          Opt.none(seq[BlobSidecar])
-      newBlockRef = (
-        await node.router.routeSignedBeaconBlock(signedBlock, blobsOpt,
+          newSeq[BlobSidecarEIP7732]()
+      
+      let newBlockRef = (
+        await node.router.routeSignedBeaconBlock(
+          signedBlock, 
+          Opt.some(blobSidecarsEIP7732),
           checkValidator = false)
       ).valueOr:
         return head # Errors logged in router
-
-    if newBlockRef.isNone():
-      return head # Validation errors logged in router
+    elif consensusFork >= ConsensusFork.Deneb:
+      # Deneb/Electra: blob commitments are in the block
+      let blobSidecars = signedBlock.create_blob_sidecars(
+        engineBid.blobsBundle.proofs,
+        engineBid.blobsBundle.blobs)
+      
+      let newBlockRef = (
+        await node.router.routeSignedBeaconBlock(
+          signedBlock,
+          Opt.some(blobSidecars),
+          checkValidator = false)
+      ).valueOr:
+        return head # Errors logged in router
+    else:
+      # Pre-Deneb: no blobs
+      let newBlockRef = (
+        await node.router.routeSignedBeaconBlock(
+          signedBlock,
+          Opt.none(seq[deneb.BlobSidecar]),
+          checkValidator = false)
+      ).valueOr:
+        return head # Errors logged in router
 
     notice "Block proposed",
       blockRoot = shortLog(blockRoot), blck = shortLog(forkyBlck),
@@ -1250,7 +1282,7 @@ proc proposeBlockAux(
     beacon_blocks_proposed.inc()
 
     return newBlockRef.get()
-
+  
 proc proposeBlock(
     node: BeaconNode,
     validator: AttachedValidator,

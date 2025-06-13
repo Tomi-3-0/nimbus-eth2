@@ -961,6 +961,7 @@ AllTests-mainnet
 ## SyncManager test suite
 ```diff
 + [SyncManager] groupBlobs() test                                                            OK
++ [SyncManager] groupBlobs() test - EIP7732                                                  OK
 + [SyncQueue# & Backward] Combination of missing parent and good blocks [3 peers] test       OK
 + [SyncQueue# & Backward] Failure request push test                                          OK
 + [SyncQueue# & Backward] Invalid block [3 peers] test                                       OK

@@ -2824,6 +2824,15 @@ proc broadcastBlobSidecar*(
       node.forkDigestAtEpoch(contextEpoch), subnet_id)
   node.broadcast(topic, blob)
 
+proc broadcastBlobSidecar*(
+    node: Eth2Node, subnet_id: BlobId, blob: fulu.BlobSidecarEIP7732):
+    Future[SendResult] {.async: (raises: [CancelledError], raw: true).} =
+  let
+    contextEpoch = blob.signed_block_header.message.slot.epoch
+    topic = getBlobSidecarTopic(
+      node.forkDigestAtEpoch(contextEpoch), subnet_id)
+  node.broadcast(topic, blob)
+
 proc broadcastSyncCommitteeMessage*(
     node: Eth2Node, msg: SyncCommitteeMessage,
     subcommitteeIdx: SyncSubcommitteeIndex):

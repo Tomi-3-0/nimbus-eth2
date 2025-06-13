@@ -313,6 +313,7 @@ type
     signed_block*: fulu.SignedBeaconBlock
     kzg_proofs*: deneb.KzgProofs
     blobs*: deneb.Blobs
+    blob_kzg_commitments*: KzgCommitments
 
   RestPublishedSignedBlockContents* = object
     case kind*: ConsensusFork
@@ -603,6 +604,8 @@ template withForkyBlck*(
     template forkyBlck: untyped {.inject, used.} = x.fuluData.signed_block
     template kzg_proofs: untyped {.inject, used.} = x.fuluData.kzg_proofs
     template blobs: untyped {.inject, used.} = x.fuluData.blobs
+    template blob_kzg_commitments: untyped {.inject, used.} = 
+      x.fuluData.blob_kzg_commitments
     body
   of ConsensusFork.Electra:
     const consensusFork {.inject, used.} = ConsensusFork.Electra
