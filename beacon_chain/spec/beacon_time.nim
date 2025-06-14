@@ -52,6 +52,14 @@ const
   FAR_FUTURE_BEACON_TIME* =
     BeaconTime(ns_since_genesis: int64.high() - NANOSECONDS_PER_SLOT.int64)
 
+  # EIP-7732 slot intervals (4 intervals per slot):
+  # Interval 1: Block proposal (start of slot)
+  # Interval 2: Attestations (1/4 through slot)
+  # Interval 3: Payload reveal by builder (2/4 through slot)
+  # Interval 4: Payload timeliness attestations (3/4 through slot)
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/fork-choice.md#constants
+  INTERVALS_PER_SLOT_EIP7732* = 4
+
 template ethTimeUnit*(typ: type) {.dirty.} =
   func `+`*(x: typ, y: uint64): typ {.borrow.}
   func `-`*(x: typ, y: uint64): typ {.borrow.}
@@ -154,6 +162,25 @@ const
   lightClientOptimisticUpdateSlotOffset* = TimeDiff(nanoseconds:
     NANOSECONDS_PER_SLOT.int64 div INTERVALS_PER_SLOT)
 
+# EIP-7732 specific offsets
+const
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md
+  # Attestations remain at 1/3 of the slot in EIP-7732 (which is 1/4 with 4 intervals)
+  attestationSlotOffsetEIP7732* = TimeDiff(nanoseconds:
+    NANOSECONDS_PER_SLOT.int64 div INTERVALS_PER_SLOT_EIP7732)
+
+  # Builder reveals payload at the start of interval 3 (2/4 through slot)
+  payloadRevealSlotOffset* = TimeDiff(nanoseconds:
+    NANOSECONDS_PER_SLOT.int64 * 2 div INTERVALS_PER_SLOT_EIP7732)
+  
+  # PTC attestations at the start of interval 4 (3/4 through slot)
+  payloadAttestationSlotOffset* = TimeDiff(nanoseconds:
+    NANOSECONDS_PER_SLOT.int64 * 3 div INTERVALS_PER_SLOT_EIP7732)
+  
+  # Aggregate attestations timing may need adjustment for EIP-7732
+  aggregateSlotOffsetEIP7732* = TimeDiff(nanoseconds:
+    NANOSECONDS_PER_SLOT.int64 * 2 div INTERVALS_PER_SLOT_EIP7732)
+
 func toFloatSeconds*(t: TimeDiff): float =
   float(t.nanoseconds) / 1_000_000_000.0
 
@@ -178,6 +205,33 @@ func light_client_finality_update_time*(s: Slot): BeaconTime =
   s.start_beacon_time + lightClientFinalityUpdateSlotOffset
 func light_client_optimistic_update_time*(s: Slot): BeaconTime =
   s.start_beacon_time + lightClientOptimisticUpdateSlotOffset
+
+# EIP-7732 specific deadlines
+func attestation_deadline_eip7732*(s: Slot): BeaconTime =
+  s.start_beacon_time + attestationSlotOffsetEIP7732
+func payload_reveal_deadline*(s: Slot): BeaconTime =
+  s.start_beacon_time + payloadRevealSlotOffset
+func payload_attestation_deadline*(s: Slot): BeaconTime =
+  s.start_beacon_time + payloadAttestationSlotOffset
+func aggregate_deadline_eip7732*(s: Slot): BeaconTime =
+  s.start_beacon_time + aggregateSlotOffsetEIP7732
+func get_slot_interval_eip7732*(t: BeaconTime, slot: Slot): uint64 =
+  let
+    slot_start = slot.start_beacon_time
+    time_since_start = t - slot_start
+  
+  if time_since_start.nanoseconds < 0:
+    return 0
+  
+  let interval = uint64(time_since_start.nanoseconds) div 
+    (NANOSECONDS_PER_SLOT div INTERVALS_PER_SLOT_EIP7732)
+  
+  min(interval, INTERVALS_PER_SLOT_EIP7732 - 1)
+func is_payload_reveal_time*(t: BeaconTime, slot: Slot): bool =
+  get_slot_interval_eip7732(t, slot) >= 2
+
+func is_payload_attestation_time*(t: BeaconTime, slot: Slot): bool =
+  get_slot_interval_eip7732(t, slot) >= 3
 
 func slotOrZero*(time: BeaconTime): Slot =
   let exSlot = time.toSlot

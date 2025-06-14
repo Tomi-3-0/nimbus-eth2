@@ -233,8 +233,14 @@ cli do(slots = SLOTS_PER_EPOCH * 7,
       syncCommittee = @(dag.syncCommitteeParticipants(slot + 1))
       genesis_validators_root = dag.genesis_validators_root
       fork = dag.forkAtEpoch(slot.epoch)
-      messagesTime = slot.attestation_deadline()
+      consensusFork = dag.cfg.consensusForkAtEpoch(slot.epoch)
+      messagesTime =
+        if consensusFork >= ConsensusFork.Fulu:
+          slot.attestation_deadline_eip7732()
+        else:  slot.attestation_deadline()
       contributionsTime = slot.sync_contribution_deadline()
+      slotStart = slot.start_beacon_time()
+      offsetInSlot = messagesTime - slotStart
 
     var aggregators: seq[Aggregator]
 

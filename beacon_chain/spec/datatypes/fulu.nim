@@ -83,6 +83,9 @@ const
   # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.4/specs/_features/eip7732/beacon-chain.md#misc
   PTC_SIZE* = 512
 
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/fork-choice.md#constants
+  PAYLOAD_TIMELY_THRESHOLD* = 256
+
   # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.4/specs/_features/eip7732/beacon-chain.md#max-operations-per-block
   MAX_PAYLOAD_ATTESTATIONS* = 4
 
