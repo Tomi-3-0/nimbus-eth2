@@ -96,7 +96,7 @@ proc get_ptc*(state: fulu.BeaconState, slot: Slot, cache: var StateCache): seq[V
 
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.4/specs/_features/eip7732/beacon-chain.md#modified-get_attesting_indices
 proc get_attesting_indices*(state: fulu.BeaconState,
-    attestation: fulu.Attestation, cache: var StateCache, 
+    attestation: electra.Attestation, cache: var StateCache, 
     cfg: RuntimeConfig): HashSet[ValidatorIndex] =
 
   var

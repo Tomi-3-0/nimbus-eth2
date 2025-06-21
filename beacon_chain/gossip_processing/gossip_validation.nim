@@ -16,7 +16,7 @@ import
   # Internals
   ../spec/[
     beaconstate, state_transition_block, forks,
-    helpers, network, signatures, peerdas_helpers],
+    helpers, network, signatures, peerdas_helpers, eip7732_helpers],
   ../consensus_object_pools/[
     attestation_pool, blockchain_dag, blob_quarantine, block_quarantine,
     data_column_quarantine, spec_cache, light_client_pool, sync_committee_msg_pool,
@@ -1942,4 +1942,166 @@ proc validateLightClientOptimisticUpdate*(
     return errIgnore("LightClientOptimisticUpdate: not matching local")
 
   pool.latestForwardedOptimisticSlot = attested_slot
+  ok()
+
+proc validateSignedExecutionPayloadHeader*(
+    dag: ChainDAGRef, quarantine: ref Quarantine,
+    signed_execution_payload_header: SignedExecutionPayloadHeader,
+    wallTime: BeaconTime): Result[void, ValidationError] =
+  
+  let header = signed_execution_payload_header.message
+  
+  # [IGNORE] header.slot is the current slot or the next slot
+  let (afterGenesis, wallSlot) = wallTime.toSlot()
+  if not afterGenesis:
+    return errIgnore("ExecutionPayloadHeader: before genesis")
+  
+  if header.slot > wallSlot + 1:
+    return errIgnore("ExecutionPayloadHeader: slot too far in future")
+  
+  if header.slot < wallSlot:
+    return errIgnore("ExecutionPayloadHeader: slot in past")
+  
+  # [IGNORE] header.parent_block_root is the hash tree 
+  # root of a known beacon block in fork choice
+  if dag.getBlockRef(header.parent_block_root).isNone():
+    return errIgnore("ExecutionPayloadHeader: parent block unknown")
+  
+  # [REJECT] The signed builder bid, header.builder_index is a valid, 
+  # active, and non-slashed builder index in state
+  withState(dag.headState):
+    when consensusFork >= ConsensusFork.Fulu:
+      if header.builder_index >= forkyState.data.validators.lenu64:
+        return dag.checkedReject("ExecutionPayloadHeader: invalid builder index")
+      
+      let builderValidator = forkyState.data.validators.asSeq[header.builder_index]
+      if builderValidator.slashed:
+        return dag.checkedReject("ExecutionPayloadHeader: builder is slashed")
+      
+      if not is_active_validator(builderValidator, get_current_epoch(forkyState.data)):
+        return dag.checkedReject("ExecutionPayloadHeader: builder is not active")
+      
+      # [REJECT] The builder signature is valid
+      if not verify_execution_payload_header_signature(
+          dag.forkAtEpoch(header.slot.epoch),
+          getStateField(dag.headState, genesis_validators_root),
+          signed_execution_payload_header,
+          forkyState.data,
+          builderValidator.pubkey,
+          signed_execution_payload_header.signature):
+        return dag.checkedReject("ExecutionPayloadHeader: invalid signature")
+    else:
+      # Before Fulu fork, these messages shouldn't exist
+      return dag.checkedReject("ExecutionPayloadHeader: not supported before Fulu fork")
+  
+  ok()
+
+proc validateSignedExecutionPayloadEnvelope*(
+    dag: ChainDAGRef, quarantine: ref Quarantine,
+    signed_execution_payload_envelope: SignedExecutionPayloadEnvelope,
+    wallTime: BeaconTime): Result[void, ValidationError] =
+  
+  let envelope = signed_execution_payload_envelope.message
+  
+  # [IGNORE] The envelope's block root envelope.beacon_block_root has been seen
+  if dag.getBlockRef(envelope.beacon_block_root).isNone():
+    return errIgnore("ExecutionPayloadEnvelope: beacon block unknown")
+  
+  # [REJECT] block passes validation (already validated if it's in the DAG)
+  
+  # Used the head state for validation (like other validation functions do)
+  withState(dag.headState):
+    when consensusFork >= ConsensusFork.Fulu:
+      # Get the header from the current state 
+      # (this assumes the envelope refers to a recent block)
+      let header = forkyState.data.latest_execution_payload_header
+      
+      # [REJECT] envelope.builder_index == header.builder_index
+      if envelope.builder_index != header.builder_index:
+        return dag.checkedReject("ExecutionPayloadEnvelope: builder index mismatch")
+      
+      # [REJECT] if envelope.payload_withheld == False then payload.block_hash == header.block_hash
+      if not envelope.payload_withheld:
+        if envelope.payload.block_hash != header.block_hash:
+          return dag.checkedReject("ExecutionPayloadEnvelope: payload block hash mismatch")
+      
+      # [REJECT] The builder signature is valid
+      if envelope.builder_index >= forkyState.data.validators.lenu64:
+        return dag.checkedReject("ExecutionPayloadEnvelope: invalid builder index")
+      
+      let builderValidator = forkyState.data.validators.asSeq[envelope.builder_index]
+      if not verify_execution_payload_envelope_signature(
+          dag.forkAtEpoch(envelope.slot.epoch),
+          getStateField(dag.headState, genesis_validators_root),
+          signed_execution_payload_envelope,
+          forkyState.data,
+          builderValidator.pubkey,
+          signed_execution_payload_envelope.signature):
+        return dag.checkedReject("ExecutionPayloadEnvelope: invalid signature")
+    else:
+      # Before Fulu fork, these messages shouldn't exist
+      return dag.checkedReject("ExecutionPayloadEnvelope: not supported before Fulu fork")
+  
+  ok()
+
+proc validatePayloadAttestationMessage*(
+    dag: ChainDAGRef, quarantine: ref Quarantine,
+    payload_attestation_message: PayloadAttestationMessage,
+    wallTime: BeaconTime): Result[void, ValidationError] =
+ 
+  let data = payload_attestation_message.data
+ 
+  # [IGNORE] The message's slot is for the current slot (with MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance)
+  let (afterGenesis, wallSlot) = wallTime.toSlot()
+  if not afterGenesis:
+    return errIgnore("PayloadAttestationMessage: before genesis")
+ 
+  # Allow for clock disparity
+  let futureSlot = (wallTime + MAXIMUM_GOSSIP_CLOCK_DISPARITY).toSlot()
+  let pastSlot = (wallTime - MAXIMUM_GOSSIP_CLOCK_DISPARITY).toSlot()
+ 
+  if futureSlot.afterGenesis and data.slot > futureSlot.slot:
+    return errIgnore("PayloadAttestationMessage: slot too far in future")
+ 
+  if pastSlot.afterGenesis and data.slot < pastSlot.slot:
+    return errIgnore("PayloadAttestationMessage: slot too far in past")
+ 
+  # [REJECT] The message's payload status is a valid status
+  if data.payload_status >= PAYLOAD_INVALID_STATUS.uint8:
+    return dag.checkedReject("PayloadAttestationMessage: invalid payload status")
+ 
+  # [IGNORE] The message's block data.beacon_block_root has been seen
+  let blockRef = dag.getBlockRef(data.beacon_block_root).valueOr:
+    return errIgnore("PayloadAttestationMessage: beacon block unknown")
+ 
+  withState(dag.headState):
+    when consensusFork >= ConsensusFork.Fulu:
+      # [REJECT] The message's validator index is valid - using safe init pattern
+      let validatorIndex = ValidatorIndex.init(payload_attestation_message.validatorIndex).valueOr:
+        return dag.checkedReject("PayloadAttestationMessage: invalid validator index")
+      
+      # [REJECT] The message's validator index is within the payload committee
+      var cache = StateCache()
+      let ptc = get_ptc(forkyState.data, data.slot, cache)
+      if validatorIndex notin ptc:
+        return dag.checkedReject("PayloadAttestationMessage: validator not in PTC")
+     
+      # [REJECT] Validator is not slashed
+      let validator = forkyState.data.validators.asSeq[validatorIndex]
+      if validator.slashed:
+        return dag.checkedReject("PayloadAttestationMessage: validator is slashed")
+     
+      # [REJECT] The message's signature is valid
+      if not verify_payload_attestation_message_signature(
+          dag.forkAtEpoch(data.slot.epoch),
+          getStateField(dag.headState, genesis_validators_root),
+          payload_attestation_message,
+          forkyState.data,
+          validator.pubkey,
+          payload_attestation_message.signature):
+        return dag.checkedReject("PayloadAttestationMessage: invalid signature")
+    else:
+      # Before Fulu fork, these messages shouldn't exist
+      return dag.checkedReject("PayloadAttestationMessage: not supported before Fulu fork")
+ 
   ok()

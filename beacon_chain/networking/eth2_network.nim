@@ -860,7 +860,9 @@ template gossipMaxSize(T: untyped): uint32 =
          T is phase0.SignedAggregateAndProof or T is phase0.SignedBeaconBlock or
          T is electra.SignedAggregateAndProof or T is electra.Attestation or
          T is electra.AttesterSlashing or T is altair.SignedBeaconBlock or
-         T is SomeForkyLightClientObject:
+         T is SomeForkyLightClientObject or T is fulu.SignedExecutionPayloadHeader or 
+         T is fulu.SignedExecutionPayloadEnvelope or
+         T is fulu.PayloadAttestationMessage:
       MAX_PAYLOAD_SIZE
     else:
       {.fatal: "unknown type " & name(T).}
@@ -2865,3 +2867,30 @@ proc broadcastLightClientOptimisticUpdate*(
   let topic = getLightClientOptimisticUpdateTopic(
     node.forkDigestAtEpoch(msg.contextEpoch))
   node.broadcast(topic, msg)
+
+proc broadcastExecutionPayloadHeader*(
+    node: Eth2Node, header: fulu.SignedExecutionPayloadHeader):
+    Future[SendResult] {.async: (raises: [CancelledError], raw: true).} =
+  let 
+    contextEpoch = header.message.slot.epoch
+    topic = getExecutionPayloadHeaderTopic(
+      node.forkDigestAtEpoch(contextEpoch))
+  node.broadcast(topic, header)
+
+proc broadcastExecutionPayloadEnvelope*(
+    node: Eth2Node, envelope: fulu.SignedExecutionPayloadEnvelope):
+    Future[SendResult] {.async: (raises: [CancelledError], raw: true).} =
+  let
+    contextEpoch = envelope.message.slot.epoch
+    topic = getExecutionPayloadTopic(
+      node.forkDigestAtEpoch(contextEpoch))
+  node.broadcast(topic, envelope)
+
+proc broadcastPayloadAttestationMessage*(
+    node: Eth2Node, message: PayloadAttestationMessage):
+    Future[SendResult] {.async: (raises: [CancelledError], raw: true).} =
+  let
+    contextEpoch = message.data.slot.epoch
+    topic = getPayloadAttestationMessageTopic(
+      node.forkDigestAtEpoch(contextEpoch))
+  node.broadcast(topic, message)

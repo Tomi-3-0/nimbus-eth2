@@ -579,6 +579,12 @@ proc runBlockPollMonitor(service: BlockServiceRef,
     vc = service.client
     roles = {BeaconNodeRole.BlockProposalData}
     statuses = {RestBeaconNodeStatus.Synced}
+    afterSlot = currentTime.slotOrZero()
+    afterFulu = vc.isPastFuluFork(afterSlot.epoch)
+    attestationDeadline = if afterFulu:
+      afterSlot.attestation_deadline_eip7732()
+    else:
+      afterSlot.attestation_deadline()
 
   logScope:
     node = node
@@ -595,7 +601,7 @@ proc runBlockPollMonitor(service: BlockServiceRef,
       currentTime = vc.beaconClock.now()
       afterSlot = currentTime.slotOrZero()
 
-    if currentTime > afterSlot.attestation_deadline():
+    if currentTime > attestationDeadline:
       # Attestation time already, lets wait for next slot.
       continue
 

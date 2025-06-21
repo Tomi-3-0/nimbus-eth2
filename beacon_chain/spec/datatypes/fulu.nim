@@ -171,15 +171,8 @@ type
     kzg_commitment_inclusion_proof*:
       array[KZG_COMMITMENT_INCLUSION_PROOF_DEPTH_EIP7732, Eth2Digest]
   BlobSidecarsEIP7732* = seq[ref BlobSidecarEIP7732]
-
-  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#payloadattestationdata
-    # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.7/specs/electra/beacon-chain.md#attestation
-  Attestation* = object
-    aggregation_bits*: ElectraCommitteeValidatorsBits
-    data*: AttestationData
-    signature*: ValidatorSig
-    committee_bits*: AttestationCommitteeBits  # [New in Electra:EIP7549]
     
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#payloadattestationdata
   PayloadAttestationData* = object
     beacon_block_root*: Eth2Digest
     slot*: Slot
@@ -193,7 +186,7 @@ type
 
   # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#payloadattestationmessage
   PayloadAttestationMessage* = object
-    validatorIndex*: ValidatorIndex
+    validatorIndex*: uint64
     data*: PayloadAttestationData
     signature*: ValidatorSig
 
@@ -799,6 +792,38 @@ func shortLog*(v: BlobSidecarEIP7732): auto =
     block_header: shortLog(v.signed_block_header.message),
     kzg_commitment: deneb.shortLog(v.kzg_commitment),
     kzg_proof: deneb.shortLog(v.kzg_proof),
+  )
+
+func shortLog*(v: ExecutionPayloadEnvelope): auto =
+  (
+    builder_index: v.builder_index,
+    beacon_block_root: shortLog(v.beacon_block_root),
+    slot: v.slot,
+    payload_withheld: v.payload_withheld,
+    state_root: shortLog(v.state_root),
+    payload_block_hash: shortLog(v.payload.block_hash),
+    payload_block_number: v.payload.block_number,
+    blob_kzg_commitments_len: v.blob_kzg_commitments.len()
+  )
+
+func shortLog*(v: SignedExecutionPayloadEnvelope): auto =
+  (
+    message: shortLog(v.message),
+    signature: shortLog(v.signature)
+  )
+
+func shortLog*(v: PayloadAttestationData): auto =
+  (
+    slot: v.slot,
+    beacon_block_root: shortLog(v.beacon_block_root),
+    payload_status: v.payload_status
+  )
+
+func shortLog*(v: PayloadAttestationMessage): auto =
+  (
+    validator_index: v.validatorIndex,
+    data: shortLog(v.data),
+    signature: shortLog(v.signature)
   )
 
 func shortLog*(v: seq[BlobSidecarEIP7732]): auto =

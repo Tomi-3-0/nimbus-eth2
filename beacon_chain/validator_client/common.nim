@@ -798,6 +798,23 @@ proc getCurrentSlot*(vc: ValidatorClientRef): Opt[Slot] =
   else:
     Opt.none(Slot)
 
+proc isPastFuluFork*(vc: ValidatorClientRef, epoch: Epoch): bool =
+  doAssert(len(vc.forks) > 0)
+  doAssert(vc.forkConfig.isSome())
+  let fuluVersion =
+    try:
+      vc.forkConfig.get()[ConsensusFork.Fulu].version
+    except KeyError:
+      raiseAssert "Fulu fork should be in forks configuration"
+  var res = false
+  for item in vc.forks:
+    if item.epoch <= epoch:
+      if item.current_version == fuluVersion:
+        res = true
+    else:
+      break
+  res
+
 proc getAttesterDutiesForSlot*(vc: ValidatorClientRef,
                                slot: Slot): seq[DutyAndProof] =
   ## Returns all `DutyAndProof` for the given `slot`.
@@ -835,7 +852,13 @@ proc getDurationToNextAttestation*(vc: ValidatorClientRef,
   if minSlot == FAR_FUTURE_SLOT:
     "<unknown>"
   else:
-    $(minSlot.attestation_deadline() - slot.start_beacon_time())
+    let
+      afterFulu = vc.isPastFuluFork(minSlot.epoch)
+      attestationDeadline = if afterFulu:
+        minSlot.attestation_deadline_eip7732()
+      else:
+        minSlot.attestation_deadline()
+    $(attestationDeadline - slot.start_beacon_time())
 
 proc getDurationToNextBlock*(vc: ValidatorClientRef, slot: Slot): string =
   var minSlot = FAR_FUTURE_SLOT
@@ -1408,7 +1431,11 @@ proc waitForBlock*(
         block_root = blockRoot
 
   try:
-    await waitAfterBlockCutoff(vc.beaconClock, slot)
+    let afterFulu = vc.isPastFuluFork(slot.epoch)
+    if afterFulu:
+      await waitAfterBlockCutoffEIP7732(vc.beaconClock, slot)
+    else:
+      await waitAfterBlockCutoff(vc.beaconClock, slot)
   except CancelledError as exc:
     let dur = Moment.now() - startTime
     debug "Waiting for block cutoff was interrupted", duration = dur

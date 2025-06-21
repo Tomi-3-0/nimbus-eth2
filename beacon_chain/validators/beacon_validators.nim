@@ -680,7 +680,6 @@ proc getBlindedExecutionPayload[
         executionRequests: builderBid.execution_requests,
         executionPayloadValue: builderBid.value))
     elif EPH is fulu_mev.BlindedExecutionPayloadAndBlobsBundle:
-      # For Fulu, use signed_execution_payload_header
       return ok(BuilderBid[EPH](
         blindedBlckPart: EPH(
           signed_execution_payload_header: builderBid.header,
@@ -1936,8 +1935,13 @@ proc handleValidatorDuties*(node: BeaconNode, lastSlot, slot: Slot) {.async: (ra
   head = newHead
 
   let
+    consensusFork = node.dag.cfg.consensusForkAtEpoch(slot.epoch)
     # The latest point in time when we'll be sending out attestations
-    attestationCutoff = node.beaconClock.fromNow(slot.attestation_deadline())
+    attestationCutoff = node.beaconClock.fromNow(
+      if consensusFork >= ConsensusFork.Fulu:
+        slot.attestation_deadline_eip7732()
+      else:
+        slot.attestation_deadline())
 
   if attestationCutoff.inFuture:
     debug "Waiting to send attestations",
@@ -1947,13 +1951,17 @@ proc handleValidatorDuties*(node: BeaconNode, lastSlot, slot: Slot) {.async: (ra
     # Wait either for the block or the attestation cutoff time to arrive
     if await node.consensusManager[].expectBlock(slot)
         .withTimeout(attestationCutoff.offset):
-      await waitAfterBlockCutoff(node.beaconClock, slot, Opt.some(head))
+      if consensusFork >= ConsensusFork.Fulu:
+        await waitAfterBlockCutoffEIP7732(node.beaconClock, slot, Opt.some(head))
+      else:
+        await waitAfterBlockCutoff(node.beaconClock, slot, Opt.some(head))
 
     # Time passed - we might need to select a new head in that case
     node.consensusManager[].updateHead(slot)
     head = node.dag.head
 
-  static: doAssert attestationSlotOffset == syncCommitteeMessageSlotOffset
+  if consensusFork < ConsensusFork.Fulu:
+    static: doAssert attestationSlotOffset == syncCommitteeMessageSlotOffset
 
   sendAttestations(node, head, slot)
   sendSyncCommitteeMessages(node, head, slot)
@@ -1964,10 +1972,15 @@ proc handleValidatorDuties*(node: BeaconNode, lastSlot, slot: Slot) {.async: (ra
   # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.10/specs/altair/validator.md#broadcast-sync-committee-contribution
   # Wait 2 / 3 of the slot time to allow messages to propagate, then collect
   # the result in aggregates
-  static:
-    doAssert aggregateSlotOffset == syncContributionSlotOffset, "Timing change?"
+  if consensusFork < ConsensusFork.Fulu:
+    static:
+      doAssert aggregateSlotOffset == syncContributionSlotOffset, "Timing change?"
   let
-    aggregateCutoff = node.beaconClock.fromNow(slot.aggregate_deadline())
+    aggregateCutoff = node.beaconClock.fromNow(
+      if consensusFork >= ConsensusFork.Fulu:
+        slot.aggregate_deadline_eip7732()
+      else:
+        slot.aggregate_deadline())
   if aggregateCutoff.inFuture:
     debug "Waiting to send aggregate attestations",
       aggregateCutoff = shortLog(aggregateCutoff.offset)

@@ -88,3 +88,24 @@ proc waitAfterBlockCutoff*(clock: BeaconClock, slot: Slot,
             slot = slot, afterBlockCutoff = shortLog(afterBlockCutoff.offset)
 
     await sleepAsync(afterBlockCutoff.offset)
+
+proc waitAfterBlockCutoffEIP7732*(clock: BeaconClock, slot: Slot,
+                                   head: Opt[BlockRef] = Opt.none(BlockRef))
+                                   {.async: (raises: [CancelledError]).} =
+  # EIP-7732 version
+  const afterBlockDelay = nanos(attestationSlotOffsetEIP7732.nanoseconds div 2)
+  let
+    afterBlockTime = clock.now() + afterBlockDelay
+    afterBlockCutoff = clock.fromNow(
+      min(afterBlockTime, slot.attestation_deadline_eip7732() + afterBlockDelay))
+
+  if afterBlockCutoff.inFuture:
+    if head.isSome():
+      debug "Got block, waiting to send attestations eip7732",
+            head = shortLog(head.get()), slot = slot,
+            afterBlockCutoff = shortLog(afterBlockCutoff.offset)
+    else:
+      debug "Got block, waiting to send attestations eip7732",
+            slot = slot, afterBlockCutoff = shortLog(afterBlockCutoff.offset)
+
+    await sleepAsync(afterBlockCutoff.offset)

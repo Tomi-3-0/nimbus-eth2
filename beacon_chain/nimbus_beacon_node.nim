@@ -1302,6 +1302,18 @@ proc addElectraMessageHandlers(
 proc addFuluMessageHandlers(
     node: BeaconNode, forkDigest: ForkDigest, slot: Slot) =
   node.addElectraMessageHandlers(forkDigest, slot)
+  
+  node.network.subscribe(
+    getExecutionPayloadHeaderTopic(forkDigest), 
+    basicParams())
+  
+  node.network.subscribe(
+    getExecutionPayloadTopic(forkDigest),
+    basicParams())
+  
+  node.network.subscribe(
+    getPayloadAttestationMessageTopic(forkDigest),
+    basicParams())
 
 proc removeAltairMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.removePhase0MessageHandlers(forkDigest)
@@ -1334,6 +1346,10 @@ proc removeElectraMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
 
 proc removeFuluMessageHandlers(node: BeaconNode, forkDigest: ForkDigest) =
   node.removeElectraMessageHandlers(forkDigest)
+  
+  # node.network.unsubscribe(getExecutionPayloadHeaderTopic(forkDigest))
+  # node.network.unsubscribe(getExecutionPayloadTopic(forkDigest))
+  # node.network.unsubscribe(getPayloadAttestationMessageTopic(forkDigest))
 
 proc updateSyncCommitteeTopics(node: BeaconNode, slot: Slot) =
   template lastSyncUpdate: untyped =
@@ -1970,6 +1986,32 @@ proc installMessageValidators(node: BeaconNode) =
             toValidationResult(
               node.processor[].processSignedBeaconBlock(
                 MsgSource.gossip, signedBlock)))
+
+      when consensusFork >= ConsensusFork.Fulu:
+        node.network.addValidator(
+          getExecutionPayloadHeaderTopic(digest), proc (
+            header: fulu.SignedExecutionPayloadHeader
+          ): ValidationResult =
+            toValidationResult(
+              node.processor.processSignedExecutionPayloadHeader(
+                MsgSource.gossip, header)))
+
+        node.network.addValidator(
+          getExecutionPayloadTopic(digest), proc (
+            envelope: fulu.SignedExecutionPayloadEnvelope
+          ): ValidationResult =
+            toValidationResult(
+              node.processor.processSignedExecutionPayloadEnvelope(
+                MsgSource.gossip, envelope)))
+
+        # payload_attestation_message
+        node.network.addValidator(
+          getPayloadAttestationMessageTopic(digest), proc (
+            message: PayloadAttestationMessage
+          ): ValidationResult =
+            toValidationResult(
+              node.processor.processPayloadAttestationMessage(
+                MsgSource.gossip, message)))
 
       # beacon_attestation_{subnet_id}
       # https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.5/specs/phase0/p2p-interface.md#beacon_attestation_subnet_id

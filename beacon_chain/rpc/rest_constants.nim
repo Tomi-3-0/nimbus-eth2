@@ -281,3 +281,22 @@ const
     "Reward value overflow"
   HistoricalSummariesUnavailable* =
     "Historical summaries unavailable"
+    # EIP-7732 validation messages
+  ExecutionPayloadHeaderValidationError* =
+    "The execution payload header failed validation"
+  ExecutionPayloadHeaderValidationSuccess* =
+    "Execution payload header was validated and broadcast"
+  ExecutionPayloadEnvelopeValidationError* =
+    "The execution payload envelope failed validation"
+  ExecutionPayloadEnvelopeValidationSuccess* =
+    "Execution payload envelope was validated and broadcast"
+  PayloadAttestationValidationError* =
+    "The payload attestation failed validation"
+  PayloadAttestationValidationSuccess* =
+    "Payload attestation was validated and broadcast"
+  InvalidExecutionPayloadHeaderObjectError* =
+    "Unable to decode execution payload header object"
+  InvalidExecutionPayloadEnvelopeObjectError* =
+    "Unable to decode execution payload envelope object"
+  InvalidPayloadAttestationObjectError* =
+    "Unable to decode payload attestation object"

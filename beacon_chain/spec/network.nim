@@ -23,6 +23,11 @@ const
   topicAggregateAndProofsSuffix = "beacon_aggregate_and_proof/ssz_snappy"
   topicBlsToExecutionChangeSuffix = "bls_to_execution_change/ssz_snappy"
 
+  # https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/p2p-interface.md#topics-and-messages  
+  topicExecutionPayloadHeader* = "execution_payload_header/ssz_snappy"
+  topicExecutionPayload* = "execution_payload/ssz_snappy"
+  topicPayloadAttestationMessage* = "payload_attestation_message/ssz_snappy"
+
 const
   # The spec now includes this as a bare uint64 as `RESP_TIMEOUT`
   RESP_TIMEOUT_DUR* = RESP_TIMEOUT.int64.seconds
@@ -67,6 +72,16 @@ func getAggregateAndProofsTopic*(forkDigest: ForkDigest): string =
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.9/specs/capella/p2p-interface.md#topics-and-messages
 func getBlsToExecutionChangeTopic*(forkDigest: ForkDigest): string =
   eth2Prefix(forkDigest) & topicBlsToExecutionChangeSuffix
+
+# https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/p2p-interface.md#topics-and-messages
+proc getExecutionPayloadHeaderTopic*(forkDigest: ForkDigest): string =
+  eth2Prefix(forkDigest) & topicExecutionPayloadHeader
+
+proc getExecutionPayloadTopic*(forkDigest: ForkDigest): string =
+  eth2Prefix(forkDigest) & topicExecutionPayload
+
+proc getPayloadAttestationMessageTopic*(forkDigest: ForkDigest): string =
+  eth2Prefix(forkDigest) & topicPayloadAttestationMessage
 
 # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.2/specs/phase0/validator.md#broadcast-attestation
 func compute_subnet_for_attestation*(

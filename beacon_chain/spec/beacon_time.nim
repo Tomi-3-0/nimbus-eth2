@@ -177,7 +177,6 @@ const
   payloadAttestationSlotOffset* = TimeDiff(nanoseconds:
     NANOSECONDS_PER_SLOT.int64 * 3 div INTERVALS_PER_SLOT_EIP7732)
   
-  # Aggregate attestations timing may need adjustment for EIP-7732
   aggregateSlotOffsetEIP7732* = TimeDiff(nanoseconds:
     NANOSECONDS_PER_SLOT.int64 * 2 div INTERVALS_PER_SLOT_EIP7732)
 

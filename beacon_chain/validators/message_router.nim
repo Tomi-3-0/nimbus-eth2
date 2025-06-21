@@ -367,7 +367,15 @@ proc routeAttestation*(
 
   let
     sendTime = router[].processor.getCurrentBeaconTime()
-    delay = sendTime - attestation.data.slot.attestation_deadline()
+    consensusFork = 
+      router[].processor.dag.cfg.consensusForkAtEpoch(
+        attestation.data.slot.epoch)
+    attestationDeadline = if consensusFork >= ConsensusFork.Fulu:
+      attestation.data.slot.attestation_deadline_eip7732()
+    else:
+      attestation.data.slot.attestation_deadline()
+    delay = sendTime - attestationDeadline
+
     res = await router[].network.broadcastAttestation(subnet_id, attestation)
 
   if res.isOk():
@@ -701,5 +709,72 @@ proc routeBlsToExecutionChange*(
     notice "BLS to execution change not sent",
       bls_to_execution_change = shortLog(bls_to_execution_change),
       error = res.error()
+
+  return ok()
+
+proc routeSignedExecutionPayloadHeader*(
+    router: ref MessageRouter,
+    header: SignedExecutionPayloadHeader): 
+    Future[SendResult] {.async: (raises: [CancelledError]).} =
+  
+  block:
+    let res = router.processor.processSignedExecutionPayloadHeader(
+      MsgSource.api, header)
+    if not res.isGoodForSending:
+      warn "Execution payload header failed validation",
+        header = shortLog(header), error = res.error()
+      return err(res.error()[1])
+
+  let res = await router[].network.broadcastExecutionPayloadHeader(header)
+  if res.isOk():
+    notice "Execution payload header sent", header = shortLog(header)
+  else: # "no broadcast" is not a fatal error
+    notice "Execution payload header not sent", 
+      header = shortLog(header), error = res.error()
+
+  return ok()
+
+proc routeSignedExecutionPayloadEnvelope*(
+    router: ref MessageRouter,
+    envelope: SignedExecutionPayloadEnvelope): 
+    Future[SendResult] {.async: (raises: [CancelledError]).} =
+  
+  block:
+    let res = router.processor.processSignedExecutionPayloadEnvelope(
+      MsgSource.api, envelope)
+    if not res.isGoodForSending:
+      warn "Execution payload envelope failed validation",
+        envelope = shortLog(envelope), error = res.error()
+      return err(res.error()[1])
+
+  let res = await router[].network.broadcastExecutionPayloadEnvelope(envelope)
+  if res.isOk():
+    notice "Execution payload envelope sent", envelope = shortLog(envelope)
+  else: # "no broadcast" is not a fatal error
+    notice "Execution payload envelope not sent", 
+      envelope = shortLog(envelope), error = res.error()
+
+  return ok()
+
+proc routePayloadAttestationMessage*(
+    router: ref MessageRouter,
+    message: PayloadAttestationMessage): 
+    Future[SendResult] {.async: (raises: [CancelledError]).} =
+  
+  block:
+    let res = router.processor.processPayloadAttestationMessage(
+      MsgSource.api, message)
+    if not res.isGoodForSending:
+      warn "Payload attestation message failed validation",
+        message = shortLog(message), error = res.error()
+      return err(res.error()[1])
+
+  let res = await router[].network.broadcastPayloadAttestationMessage(message)
+  if res.isOk():
+    # beacon_payload_attestations_sent.inc()
+    notice "Payload attestation message sent", message = shortLog(message)
+  else: # "no broadcast" is not a fatal error
+    notice "Payload attestation message not sent", 
+      message = shortLog(message), error = res.error()
 
   return ok()

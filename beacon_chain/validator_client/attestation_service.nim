@@ -44,6 +44,11 @@ proc serveAttestation(
     validator = registered.validator
     attestationSlot = registered.data.slot
     afterElectra = vc.isPastElectraFork(attestationSlot.epoch)
+    afterFulu = vc.isPastFuluFork(attestationSlot.epoch)
+    attestationDeadline = if afterFulu:
+      attestationSlot.attestation_deadline_eip7732()
+    else:
+      attestationSlot.attestation_deadline()
 
   logScope:
     validator = validatorLog(validator)
@@ -62,7 +67,7 @@ proc serveAttestation(
       raise exc
 
   logScope:
-    delay = vc.getDelay(attestationSlot.attestation_deadline())
+    delay = vc.getDelay(attestationDeadline)
 
   debug "Sending attestation"
 
@@ -94,7 +99,7 @@ proc serveAttestation(
       submitAttestation(attestation)
 
   if res:
-    let delay = vc.getDelay(attestationSlot.attestation_deadline())
+    let delay = vc.getDelay(attestationDeadline)
     beacon_attestations_sent.inc()
     beacon_attestation_sent_delay.observe(delay.toFloatSeconds())
     notice "Attestation published"
@@ -238,6 +243,11 @@ proc produceAndPublishAttestations*(
   let
     vc = service.client
     fork = vc.forkAtEpoch(slot.epoch)
+    afterFulu = vc.isPastFuluFork(slot.epoch)
+    attestationDeadline = if afterFulu:
+      slot.attestation_deadline_eip7732()
+    else:
+      slot.attestation_deadline()
 
   let data = await vc.produceAttestationData(slot, committee_index,
                                              ApiStrategyKind.Best)
@@ -316,7 +326,7 @@ proc produceAndPublishAttestations*(
               inc(errored)
           (succeed, errored, failed)
 
-    let delay = vc.getDelay(slot.attestation_deadline())
+    let delay = vc.getDelay(attestationDeadline)
     debug "Attestation statistics", total = len(pendingAttestations),
           succeed = statistics[0], failed_to_deliver = statistics[1],
           not_accepted = statistics[2], delay = delay, slot = slot,
@@ -430,10 +440,15 @@ proc publishAttestationsAndAggregates(
     committee_index: CommitteeIndex,
     duties: seq[DutyAndProof]
 ) {.async: (raises: [CancelledError]).} =
-  let vc = service.client
+  let 
+    vc = service.client
+    afterFulu = vc.isPastFuluFork(slot.epoch)
+    attestationDeadline = if afterFulu:
+      slot.attestation_deadline_eip7732()
+    else: slot.attestation_deadline()
 
   block:
-    let delay = vc.getDelay(slot.attestation_deadline())
+    let delay = vc.getDelay(attestationDeadline)
     debug "Producing attestations", delay = delay, slot = slot,
                                     committee_index = committee_index,
                                     duties_count = len(duties)
@@ -522,6 +537,11 @@ proc produceAndPublishAttestationsV2*(
             data: data
           ))
         tmp
+    afterFulu = vc.isPastFuluFork(slot.epoch)
+    attestationDeadline = if afterFulu:
+      slot.attestation_deadline_eip7732()
+    else:
+      slot.attestation_deadline()
 
   if registeredRes.isErr():
     warn "Could not update slashing database, skipping attestation duties",
@@ -551,7 +571,7 @@ proc produceAndPublishAttestationsV2*(
             inc(errored)
         (succeed, errored, failed)
 
-    delay = vc.getDelay(slot.attestation_deadline())
+    delay = vc.getDelay(attestationDeadline)
 
   debug "Attestation statistics", total = len(pendingAttestations),
         succeed = statistics[0], failed_to_deliver = statistics[1],
@@ -677,9 +697,14 @@ proc publishAttestationsAndAggregatesV2(
 ) {.async: (raises: [CancelledError]).} =
   let
     vc = service.client
+    afterFulu = vc.isPastFuluFork(slot.epoch)
+    attestationDeadline = if afterFulu:
+      slot.attestation_deadline_eip7732()
+    else:
+      slot.attestation_deadline()
 
   block:
-    let delay = vc.getDelay(slot.attestation_deadline())
+    let delay = vc.getDelay(attestationDeadline)
     debug "Producing attestations", delay = delay, slot = slot,
                                     duties_count = len(duties)
 

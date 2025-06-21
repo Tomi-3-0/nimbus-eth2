@@ -659,6 +659,7 @@ proc registerAttestation*(
     attestation: phase0.Attestation | SingleAttestation, idx: ValidatorIndex) =
   let
     slot = attestation.data.slot
+    # [TODO] attestation deadline should be fork aware
     delay = seen_timestamp - slot.attestation_deadline()
 
   self.withMonitor(idx):

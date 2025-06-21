@@ -75,6 +75,19 @@ declareCounter beacon_light_client_optimistic_update_received,
 declareCounter beacon_light_client_optimistic_update_dropped,
   "Number of invalid light client optimistic update dropped by this node", labels = ["reason"]
 
+declareCounter beacon_execution_payload_headers_received,
+  "Number of valid execution payload headers received"
+declareCounter beacon_execution_payload_headers_dropped,
+  "Number of invalid execution payload headers dropped"
+declareCounter beacon_execution_payload_envelopes_received,
+  "Number of valid execution payload envelopes received"
+declareCounter beacon_execution_payload_envelopes_dropped,
+  "Number of invalid execution payload envelopes dropped"
+declareCounter beacon_payload_attestations_received,
+  "Number of valid payload attestations received"
+declareCounter beacon_payload_attestations_dropped,
+  "Number of invalid payload attestations dropped"
+
 const delayBuckets = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, Inf]
 
 declareHistogram beacon_attestation_delay,
@@ -147,6 +160,9 @@ type
     # Application-provided current time provider (to facilitate testing)
     getCurrentBeaconTime*: GetBeaconTimeFn
 
+    # specific quarantine for payload envelopes
+    payloadEnvelopeQuarantine*: Table[Eth2Digest, SignedExecutionPayloadEnvelope]
+
   ValidationRes* = Result[void, ValidationError]
 
 func toValidationResult*(res: ValidationRes): ValidationResult =
@@ -186,6 +202,7 @@ proc new*(T: type Eth2Processor,
     quarantine: quarantine,
     blobQuarantine: blobQuarantine,
     getCurrentBeaconTime: getBeaconTime,
+    payloadEnvelopeQuarantine: initTable[Eth2Digest, SignedExecutionPayloadEnvelope](),
     batchCrypto: BatchCrypto.new(
       rng = rng,
       # Only run eager attestation signature verification if we're not
@@ -711,4 +728,110 @@ proc processLightClientOptimisticUpdate*(
     beacon_light_client_optimistic_update_received.inc()
   else:
     beacon_light_client_optimistic_update_dropped.inc(1, [$v.error[0]])
+  v
+  
+proc processSignedExecutionPayloadHeader*(
+    self: ref Eth2Processor, src: MsgSource,
+    header: SignedExecutionPayloadHeader): ValidationRes =
+  
+  let wallTime = self.getCurrentBeaconTime()
+  
+  logScope:
+    slot = header.message.slot
+    builder_index = header.message.builder_index
+    value = header.message.value
+
+  # Use gossip validation from our validator_change_pool integration
+  let v = validateSignedExecutionPayloadHeader(
+    self.dag, self.quarantine, header, wallTime)
+  
+  if v.isOk():
+    # Check for duplicates using the existing pool
+    if self.validatorChangePool[].isSeen(header):
+      return errIgnore("SignedExecutionPayloadHeader: already seen")
+
+    debug "Execution payload header validated"
+    beacon_execution_payload_headers_received.inc()
+    
+    # Add to the existing validator change pool
+    self.validatorChangePool[].addMessage(header)
+    
+    # Trigger callback if set
+    if not self.validatorChangePool[].onExecutionPayloadHeaderReceived.isNil:
+      self.validatorChangePool[].onExecutionPayloadHeaderReceived(header)
+  else:
+    debug "Dropping execution payload header", reason = v.error()
+    beacon_execution_payload_headers_dropped.inc()
+  
+  v
+
+proc processSignedExecutionPayloadEnvelope*(
+    self: ref Eth2Processor, src: MsgSource,
+    envelope: SignedExecutionPayloadEnvelope): ValidationRes =
+  
+  let wallTime = self.getCurrentBeaconTime()
+  
+  logScope:
+    beacon_block_root = shortLog(envelope.message.beacon_block_root)
+    builder_index = envelope.message.builder_index
+    payload_withheld = envelope.message.payload_withheld
+
+  # Use gossip validation from our validator_change_pool integration  
+  let v = validateSignedExecutionPayloadEnvelope(
+    self.dag, self.quarantine, envelope, wallTime)
+  
+  if v.isOk():
+    # Check for duplicates using the existing pool
+    if self.validatorChangePool[].isSeen(envelope):
+      return errIgnore("SignedExecutionPayloadEnvelope: already seen")
+
+    debug "Execution payload envelope validated"
+    beacon_execution_payload_envelopes_received.inc()
+    
+    # Add to the existing validator change pool
+    self.validatorChangePool[].addMessage(envelope)
+    
+    # Trigger callback if set
+    if not self.validatorChangePool[].onExecutionPayloadEnvelopeReceived.isNil:
+      self.validatorChangePool[].onExecutionPayloadEnvelopeReceived(envelope)
+  else:
+    debug "Dropping execution payload envelope", reason = v.error()
+    beacon_execution_payload_envelopes_dropped.inc()
+  
+  v
+
+proc processPayloadAttestationMessage*(
+    self: ref Eth2Processor, src: MsgSource,
+    message: PayloadAttestationMessage): ValidationRes =
+  
+  let wallTime = self.getCurrentBeaconTime()
+  
+  logScope:
+    validator_index = message.validatorIndex
+    slot = message.data.slot
+    beacon_block_root = shortLog(message.data.beacon_block_root)
+    payload_status = message.data.payload_status
+
+  # Use gossip validation from our validator_change_pool integration
+  let v = validatePayloadAttestationMessage(
+    self.dag, self.quarantine, message, wallTime)
+  
+  if v.isOk():
+    # Check for duplicates using the existing pool
+    if self.validatorChangePool[].isSeen(message):
+      return errIgnore("PayloadAttestationMessage: already seen")
+
+    debug "Payload attestation message validated"
+    beacon_payload_attestations_received.inc()
+    
+    # Add to the existing validator change pool
+    self.validatorChangePool[].addMessage(message)
+    
+    # Trigger callback if set
+    if not self.validatorChangePool[].onPayloadAttestationReceived.isNil:
+      self.validatorChangePool[].onPayloadAttestationReceived(message)
+  else:
+    debug "Dropping payload attestation message", reason = v.error()
+    beacon_payload_attestations_dropped.inc()
+  
   v

@@ -98,6 +98,11 @@ proc produceAndPublishSyncCommitteeMessages(
   let
     vc = service.client
     startTime = Moment.now()
+    afterFulu = vc.isPastFuluFork(slot.epoch)
+    attestationDeadline = if afterFulu:
+      slot.attestation_deadline_eip7732()
+    else:
+      slot.attestation_deadline()
 
   let pendingSyncCommitteeMessages =
     block:
@@ -131,7 +136,7 @@ proc produceAndPublishSyncCommitteeMessages(
       (succeed, errored, failed)
 
   let
-    delay = vc.getDelay(slot.attestation_deadline())
+    delay = vc.getDelay(attestationDeadline)
     dur = Moment.now() - startTime
 
   debug "Sync committee message statistics",
