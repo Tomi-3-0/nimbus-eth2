@@ -241,7 +241,8 @@ from web3/engine_api_types import
   PayloadExecutionStatus, PayloadStatusV1
 from ../el/el_manager import
   ELManager, DeadlineObject, forkchoiceUpdated, hasConnection,
-  hasProperlyConfiguredConnection, sendNewPayload, init
+  hasProperlyConfiguredConnection, sendNewPayload, init, 
+  sendExecutionPayloadEnvelope
 
 proc expectValidForkchoiceUpdated(
     elManager: ELManager, headBlockPayloadAttributesType: typedesc,
@@ -298,7 +299,31 @@ proc newExecutionPayload*(
     deadlineObj: DeadlineObject,
     maxRetriesCount: int
 ): Future[Opt[PayloadExecutionStatus]] {.async: (raises: [CancelledError]).} =
-  when typeof(blck).kind < ConsensusFork.Fulu:
+  when typeof(blck).kind >= ConsensusFork.Fulu:
+    # EIP-7732: Block contains only execution payload header, no actual payload
+    let payloadHeader = blck.body.signed_execution_payload_header.message
+    
+    if not elManager.hasProperlyConfiguredConnection:
+      debug "No execution client connected; cannot process block headers",
+        parentBlockHash = shortLog(payloadHeader.parent_block_hash),
+        blockHash = shortLog(payloadHeader.block_hash),
+        slot = payloadHeader.slot,
+        builderIndex = payloadHeader.builder_index
+      return Opt.none PayloadExecutionStatus
+    
+    debug "EIP-7732 block with execution payload header only - no payload to send to EL",
+      parentBlockHash = shortLog(payloadHeader.parent_block_hash),
+      blockHash = shortLog(payloadHeader.block_hash),
+      slot = payloadHeader.slot,
+      builderIndex = payloadHeader.builder_index,
+      gasLimit = payloadHeader.gas_limit,
+      value = payloadHeader.value
+    
+    # The actual payload will be sent separately when ExecutionPayloadEnvelope arrives
+    # The block is valid from consensus perspective with just the header
+    return Opt.some PayloadExecutionStatus.valid
+  else:
+    # Pre-EIP-7732: Process execution payloads normally
     template executionPayload: untyped = blck.body.execution_payload
     
     if not elManager.hasProperlyConfiguredConnection:
@@ -329,40 +354,6 @@ proc newExecutionPayload*(
         blockHash = shortLog(executionPayload.block_hash),
         blockNumber = executionPayload.block_number
       return Opt.none PayloadExecutionStatus
-  else:
-    # Payload header fields used for epbs
-    when typeof(blck).kind >= ConsensusFork.Fulu:
-      let payloadHeader = 
-        blck.body.signed_execution_payload_header.message
-      
-      if not elManager.hasProperlyConfiguredConnection:
-        debug "No execution client connected; cannot process block payloads"
-        return Opt.none PayloadExecutionStatus
-      
-      debug "newPayload: inserting block header into execution engine",
-        parentBlockHash = shortLog(payloadHeader.parent_block_hash),
-        blockHash = shortLog(payloadHeader.block_hash),
-        slot = payloadHeader.slot,
-        builderIndex = payloadHeader.builder_index
-      
-      try:
-        # You might need to adjust this based on how sendNewPayload handles header-only payloads
-        let payloadStatus =
-          await elManager.sendNewPayload(blck, deadlineObj, maxRetriesCount)
-        debug "newPayloadHeader: succeeded",
-          parentBlockHash = shortLog(payloadHeader.parent_block_hash),
-          blockHash = shortLog(payloadHeader.block_hash),
-          payloadStatus = $payloadStatus
-        return Opt.some payloadStatus
-      except CatchableError as err:
-        warn "newPayloadHeader failed - check execution client",
-          msg = err.msg,
-          parentBlockHash = shortLog(payloadHeader.parent_block_hash),
-          blockHash = shortLog(payloadHeader.block_hash)
-        return Opt.none PayloadExecutionStatus
-    else:
-      debug "Unsupported block type for payload processing"
-      return Opt.none PayloadExecutionStatus
 
 proc newExecutionPayload*(
     elManager: ELManager,
@@ -371,6 +362,65 @@ proc newExecutionPayload*(
   async: (raises: [CancelledError], raw: true).} =
   newExecutionPayload(
     elManager, blck, DeadlineObject.init(FORKCHOICEUPDATED_TIMEOUT),
+    high(int))
+
+proc newExecutionPayloadEnvelope*(
+    elManager: ELManager,
+    envelope: SignedExecutionPayloadEnvelope,
+    deadlineObj: DeadlineObject,
+    maxRetriesCount: int
+): Future[Opt[PayloadExecutionStatus]] {.async: (raises: [CancelledError]).} =
+  
+  if not elManager.hasProperlyConfiguredConnection:
+    if elManager.hasConnection:
+      info "No execution client connected; cannot process payload envelopes",
+        slot = envelope.message.slot,
+        builder = envelope.message.builder_index,
+        blockHash = shortLog(envelope.message.payload.block_hash)
+    else:
+      debug "No execution client connected; cannot process payload envelopes",
+        slot = envelope.message.slot,
+        builder = envelope.message.builder_index
+    return Opt.none PayloadExecutionStatus
+  
+  if envelope.message.payload_withheld:
+    debug "Payload withheld by builder - no execution processing needed",
+      slot = envelope.message.slot,
+      builder = envelope.message.builder_index,
+      beaconBlockRoot = shortLog(envelope.message.beacon_block_root)
+    return Opt.some PayloadExecutionStatus.valid
+  
+  debug "newPayloadEnvelope: inserting execution payload into execution engine",
+    slot = envelope.message.slot,
+    builder = envelope.message.builder_index,
+    blockHash = shortLog(envelope.message.payload.block_hash),
+    parentHash = shortLog(envelope.message.payload.parent_hash),
+    beaconBlockRoot = shortLog(envelope.message.beacon_block_root)
+  
+  try:
+    let payloadStatus =
+      await elManager.sendExecutionPayloadEnvelope(envelope, deadlineObj, maxRetriesCount)
+    debug "newPayloadEnvelope: succeeded",
+      slot = envelope.message.slot,
+      builder = envelope.message.builder_index,
+      blockHash = shortLog(envelope.message.payload.block_hash),
+      payloadStatus = $payloadStatus
+    return Opt.some payloadStatus
+  except CatchableError as err:
+    warn "newPayloadEnvelope failed - check execution client",
+      msg = err.msg,
+      slot = envelope.message.slot,
+      builder = envelope.message.builder_index,
+      blockHash = shortLog(envelope.message.payload.block_hash)
+    return Opt.none PayloadExecutionStatus
+
+proc newExecutionPayloadEnvelope*(
+    elManager: ELManager,
+    envelope: SignedExecutionPayloadEnvelope
+): Future[Opt[PayloadExecutionStatus]] {.
+  async: (raises: [CancelledError], raw: true).} =
+  newExecutionPayloadEnvelope(
+    elManager, envelope, DeadlineObject.init(FORKCHOICEUPDATED_TIMEOUT),
     high(int))
 
 proc getExecutionValidity(

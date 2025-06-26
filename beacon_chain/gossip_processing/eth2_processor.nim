@@ -741,7 +741,6 @@ proc processSignedExecutionPayloadHeader*(
     builder_index = header.message.builder_index
     value = header.message.value
 
-  # Use gossip validation from our validator_change_pool integration
   let v = validateSignedExecutionPayloadHeader(
     self.dag, self.quarantine, header, wallTime)
   

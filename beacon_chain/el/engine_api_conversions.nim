@@ -10,7 +10,8 @@
 import
   kzg4844/[kzg_abi, kzg],
   ../spec/datatypes/[bellatrix, capella, deneb, electra, fulu],
-  web3/[engine_api, engine_api_types]
+  web3/[engine_api, engine_api_types],
+  ../spec/eth2_ssz_serialization
 
 from std/sequtils import mapIt
 
@@ -328,6 +329,34 @@ func asEngineExecutionPayload*(
     excessBlobGas: Quantity(executionPayload.excess_blob_gas))
 
 func asEngineExecutionPayload*(
+    executionPayload: fulu.ExecutionPayload
+): ExecutionPayloadV3 =
+  
+  template getTypedTransaction(tt: bellatrix.Transaction): TypedTransaction =
+    TypedTransaction(tt.distinctBase)
+
+  engine_api.ExecutionPayloadV3(
+    parentHash: executionPayload.parent_hash.asBlockHash,
+    feeRecipient: Address(executionPayload.fee_recipient.data),
+    stateRoot: executionPayload.state_root.asBlockHash,
+    receiptsRoot: executionPayload.receipts_root.asBlockHash,
+    logsBloom:
+      FixedBytes[BYTES_PER_LOGS_BLOOM](executionPayload.logs_bloom.data),
+    prevRandao: executionPayload.prev_randao.data.to(Bytes32),
+    blockNumber: Quantity(executionPayload.block_number),
+    gasLimit: Quantity(executionPayload.gas_limit),
+    gasUsed: Quantity(executionPayload.gas_used),
+    timestamp: Quantity(executionPayload.timestamp),
+    extraData: DynamicBytes[0, MAX_EXTRA_DATA_BYTES](executionPayload.extra_data),
+    baseFeePerGas: executionPayload.base_fee_per_gas,
+    blockHash: executionPayload.block_hash.asBlockHash,
+    transactions: mapIt(executionPayload.transactions, it.getTypedTransaction),
+    withdrawals: mapIt(executionPayload.withdrawals, it.asEngineWithdrawal),
+    blobGasUsed: Quantity(executionPayload.blob_gas_used),
+    excessBlobGas: Quantity(executionPayload.excess_blob_gas))
+
+# This creates mostly empty/fake data
+func asEngineExecutionPayloadFromHeader*(
     blockBody: fulu.BeaconBlockBody
     ):ExecutionPayloadV3 =
   template executionPayload(): untyped = 
@@ -354,3 +383,102 @@ func asEngineExecutionPayload*(
       withdrawals: @[],
       blobGasUsed: Quantity(0),
       excessBlobGas: Quantity(0))
+
+func asExecutionPayloadHeader*(
+    response: GetPayloadV4Response,
+    builderIndex: ValidatorIndex,
+    slot: Slot,
+    parentBlockRoot: Eth2Digest): fulu.ExecutionPayloadHeader =
+  
+  let consensusPayload = response.asConsensusTypeFulu()
+  
+  fulu.ExecutionPayloadHeader(
+    parent_block_hash: response.executionPayload.parentHash.asEth2Digest,
+    parent_block_root: parentBlockRoot,
+    block_hash: response.executionPayload.blockHash.asEth2Digest,
+    gas_limit: response.executionPayload.gasLimit.uint64,
+    builder_index: builderIndex.uint64,
+    slot: slot,
+    value:
+      (if response.blockValue <= uint64.high.u256:
+        response.blockValue.truncate(uint64).Gwei 
+      else: uint64.high.Gwei),
+    blob_kzg_commitments_root: 
+      hash_tree_root(consensusPayload.blobsBundle.commitments)
+  )
+
+func asExecutionPayloadEnvelope*(
+    response: GetPayloadV4Response,
+    builderIndex: ValidatorIndex,
+    beaconBlockRoot: Eth2Digest,
+    slot: Slot,
+    payloadWithheld: bool = false): fulu.ExecutionPayloadEnvelope =
+  
+  let consensusPayload = response.asConsensusTypeFulu()
+  
+  let structuredRequests = block:
+    var deposits: seq[electra.DepositRequest] = @[]
+    var withdrawals: seq[electra.WithdrawalRequest] = @[]
+    var consolidations: seq[electra.ConsolidationRequest] = @[]
+    
+    for request in consensusPayload.executionRequests:
+      if request.len == 0: continue
+      let requestType = request[0]
+      let requestData = request[1..^1]
+      try:
+        case requestType:
+        of 0x00: deposits.add(SSZ.decode(requestData, electra.DepositRequest))
+        of 0x01: withdrawals.add(SSZ.decode(requestData, electra.WithdrawalRequest))
+        of 0x02: consolidations.add(SSZ.decode(requestData, electra.ConsolidationRequest))
+        else: discard
+      except: discard
+    
+    electra.ExecutionRequests(
+      deposits: List[electra.DepositRequest, Limit MAX_DEPOSIT_REQUESTS_PER_PAYLOAD].init(deposits),
+      withdrawals: List[electra.WithdrawalRequest, Limit MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD].init(withdrawals),
+      consolidations: List[electra.ConsolidationRequest, Limit MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD].init(consolidations)
+    )
+  
+  fulu.ExecutionPayloadEnvelope(
+    payload: consensusPayload.executionPayload,
+    execution_requests: structuredRequests,
+    builder_index: builderIndex.uint64,
+    beacon_block_root: beaconBlockRoot,
+    slot: slot,
+    blob_kzg_commitments: consensusPayload.blobsBundle.commitments,
+    payload_withheld: payloadWithheld,
+    state_root: Eth2Digest()
+  )
+
+func createSignedExecutionPayloadHeader*(
+    response: GetPayloadV4Response,
+    builderIndex: ValidatorIndex,
+    slot: Slot,
+    parentBlockRoot: Eth2Digest,
+    signature: ValidatorSig): fulu.SignedExecutionPayloadHeader =
+  
+  let header = response.asExecutionPayloadHeader(
+    builderIndex, slot, parentBlockRoot)
+  
+  fulu.SignedExecutionPayloadHeader(
+    message: header,
+    signature: signature
+  )
+
+func createSignedExecutionPayloadEnvelope*(
+    response: GetPayloadV4Response,
+    builderIndex: ValidatorIndex,
+    beaconBlockRoot: Eth2Digest,
+    slot: Slot,
+    stateRoot: Eth2Digest,
+    signature: ValidatorSig,
+    payloadWithheld: bool = false): fulu.SignedExecutionPayloadEnvelope =
+  
+  var envelope = response.asExecutionPayloadEnvelope(
+    builderIndex, beaconBlockRoot, slot, payloadWithheld)
+  envelope.state_root = stateRoot
+  
+  fulu.SignedExecutionPayloadEnvelope(
+    message: envelope,
+    signature: signature
+  )

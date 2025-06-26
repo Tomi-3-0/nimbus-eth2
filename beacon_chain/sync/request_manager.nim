@@ -460,7 +460,7 @@ proc getMissingBlobs(rman: RequestManager): seq[BlobIdentifier] =
   for blobless in rman.quarantine[].peekBlobless():
     withBlck(blobless):
       when consensusFork == ConsensusFork.Fulu:
-        # For Fulu, check if the block needs blobs by checking the
+        # For Fulu-eip7732, check if the block needs blobs by checking the
         # blob_kzg_commitments_root in the signed_execution_payload_header
         let hasBlobs = 
           forkyBlck.message.body.signed_execution_payload_header

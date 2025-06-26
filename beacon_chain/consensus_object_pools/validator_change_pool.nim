@@ -30,7 +30,6 @@ const
   # EIP-7732 bounds
   EXECUTION_PAYLOAD_HEADERS_BOUND = MAX_PAYLOAD_ATTESTATIONS * 4  # Allow multiple headers per slot
   PAYLOAD_ATTESTATIONS_BOUND = MAX_PAYLOAD_ATTESTATIONS * 4
-  EXECUTION_PAYLOAD_ENVELOPES_BOUND = 256'u64  # Reasonable bound for recent envelopes
 
 type
   OnVoluntaryExitCallback =

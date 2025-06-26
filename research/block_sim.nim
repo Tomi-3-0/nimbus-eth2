@@ -103,32 +103,55 @@ proc makeSimulationBlock(
     rollback: RollbackHashedProc[fulu.HashedBeaconState],
     cache: var StateCache,
     verificationFlags: UpdateFlags = {}): Result[fulu.BeaconBlock, cstring] =
-
+  
+  # Get the proposer's private key
+  let builderPrivKey = MockPrivKeys[proposer_index]
+  
+  let executionPayloadHeader = fulu.ExecutionPayloadHeader(
+    parent_block_hash: execution_payload.executionPayload.parent_hash,
+    parent_block_root: hash_tree_root(state.data.latest_block_header),
+    block_hash: execution_payload.executionPayload.block_hash,
+    gas_limit: execution_payload.executionPayload.gas_limit,
+    builder_index: proposer_index.uint64,
+    slot: state.data.slot,
+    value: 0.Gwei,
+    blob_kzg_commitments_root:
+      hash_tree_root(execution_payload.blobsBundle.commitments)
+  )
+  
+  # Create unsigned header for signing
+  let unsignedHeader = fulu.SignedExecutionPayloadHeader(
+    message: executionPayloadHeader,
+    signature: default(ValidatorSig)
+  )
+  
+  # Sign the header using the same pattern as the main code
+  let headerSignature = get_execution_payload_header_signature(
+    state.data.fork,
+    state.data.genesis_validators_root,
+    unsignedHeader,
+    state.data,
+    builderPrivKey
+  )
+  
+  # Create the block using partialBeaconBlock with the signature
   var blck = partialBeaconBlock(
     cfg, state, proposer_index, randao_reveal, Eth1Data(),
     default(GraffitiBytes), attestations, @[], exits, sync_aggregate,
-    execution_payload, ExecutionRequests())
-
-  let
-    fork = state.data.fork
-    genesis_validators_root = state.data.genesis_validators_root
-    epoch = state.data.slot.epoch
-    builderPrivKey = MockPrivKeys[proposer_index]
-    domain = get_domain(
-      fork, DOMAIN_BEACON_BUILDER, epoch, genesis_validators_root)
-    signing_root = compute_signing_root(
-      blck.body.signed_execution_payload_header.message, domain)
+    execution_payload, ExecutionRequests(), headerSignature.toValidatorSig())
   
-  let signature = blsSign(builderPrivKey, signing_root.data).toValidatorSig()
-  
-  blck.body.signed_execution_payload_header.signature = signature
-  
+  # Process the block
   let res = process_block(
     cfg, state.data, blck.asSigVerified(), verificationFlags, cache)
-
+  
+  if res.isErr:
+    rollback(state)
+    return err(res.error())
+  
+  # Update state root
   state.root = hash_tree_root(state.data)
   blck.state_root = state.root
-
+  
   ok(blck)
 
 # TODO confutils is an impenetrable black box. how can a help text be added here?
