@@ -1962,6 +1962,11 @@ proc validateSignedExecutionPayloadHeader*(
   if header.slot < wallSlot:
     return errIgnore("ExecutionPayloadHeader: slot in past")
   
+  # [REJECT] Check if we're in Fulu fork for this header's slot (FIXED)
+  let headerFork = dag.cfg.consensusForkAtEpoch(header.slot.epoch)
+  if headerFork < ConsensusFork.Fulu:
+    return dag.checkedReject("ExecutionPayloadHeader: not supported before Fulu fork")
+  
   # [IGNORE] header.parent_block_root is the hash tree 
   # root of a known beacon block in fork choice
   if dag.getBlockRef(header.parent_block_root).isNone():
@@ -1991,8 +1996,8 @@ proc validateSignedExecutionPayloadHeader*(
           signed_execution_payload_header.signature):
         return dag.checkedReject("ExecutionPayloadHeader: invalid signature")
     else:
-      # Before Fulu fork, these messages shouldn't exist
-      return dag.checkedReject("ExecutionPayloadHeader: not supported before Fulu fork")
+      # This should not happen since we check fork above, but keeping for safety
+      return dag.checkedReject("ExecutionPayloadHeader: consensus fork mismatch")
   
   ok()
 
@@ -2002,6 +2007,11 @@ proc validateSignedExecutionPayloadEnvelope*(
     wallTime: BeaconTime): Result[void, ValidationError] =
   
   let envelope = signed_execution_payload_envelope.message
+  
+  # [REJECT] Check if we're in Fulu fork for this envelope's slot (FIXED)
+  let envelopeFork = dag.cfg.consensusForkAtEpoch(envelope.slot.epoch)
+  if envelopeFork < ConsensusFork.Fulu:
+    return dag.checkedReject("ExecutionPayloadEnvelope: not supported before Fulu fork")
   
   # [IGNORE] The envelope's block root envelope.beacon_block_root has been seen
   if dag.getBlockRef(envelope.beacon_block_root).isNone():
@@ -2039,8 +2049,8 @@ proc validateSignedExecutionPayloadEnvelope*(
           signed_execution_payload_envelope.signature):
         return dag.checkedReject("ExecutionPayloadEnvelope: invalid signature")
     else:
-      # Before Fulu fork, these messages shouldn't exist
-      return dag.checkedReject("ExecutionPayloadEnvelope: not supported before Fulu fork")
+      # This should not happen since we check fork above, but keeping for safety
+      return dag.checkedReject("ExecutionPayloadEnvelope: consensus fork mismatch")
   
   ok()
 
@@ -2065,6 +2075,11 @@ proc validatePayloadAttestationMessage*(
  
   if pastSlot.afterGenesis and data.slot < pastSlot.slot:
     return errIgnore("PayloadAttestationMessage: slot too far in past")
+ 
+  # [REJECT] Check if we're in Fulu fork for this message's slot (FIXED)
+  let messageFork = dag.cfg.consensusForkAtEpoch(data.slot.epoch)
+  if messageFork < ConsensusFork.Fulu:
+    return dag.checkedReject("PayloadAttestationMessage: not supported before Fulu fork")
  
   # [REJECT] The message's payload status is a valid status
   if data.payload_status >= PAYLOAD_INVALID_STATUS.uint8:
@@ -2101,7 +2116,7 @@ proc validatePayloadAttestationMessage*(
           payload_attestation_message.signature):
         return dag.checkedReject("PayloadAttestationMessage: invalid signature")
     else:
-      # Before Fulu fork, these messages shouldn't exist
-      return dag.checkedReject("PayloadAttestationMessage: not supported before Fulu fork")
+      # This should not happen since we check fork above, but keeping for safety
+      return dag.checkedReject("PayloadAttestationMessage: consensus fork mismatch")
  
   ok()

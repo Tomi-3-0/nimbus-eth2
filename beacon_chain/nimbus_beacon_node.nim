@@ -352,6 +352,15 @@ proc initFullNode(
         else:
           data
       eventBus.finalQueue.emit(eventData)
+  proc onExecutionPayloadEnvelopeReceived(data: SignedExecutionPayloadEnvelope) =
+    asyncSpawn node.blockProcessor.processExecutionPayloadEnvelope(
+      MsgSource.gossip, data)
+
+  proc onExecutionPayloadHeaderReceived(data: SignedExecutionPayloadHeader) =
+    discard
+  
+  proc onPayloadAttestationReceived(data: PayloadAttestationMessage) =
+    discard
 
   func getLocalHeadSlot(): Slot =
     dag.head.slot
@@ -400,7 +409,9 @@ proc initFullNode(
     validatorChangePool = newClone(ValidatorChangePool.init(
       dag, attestationPool, onVoluntaryExitAdded, onBLSToExecutionChangeAdded,
       onProposerSlashingAdded, onPhase0AttesterSlashingAdded,
-      onElectraAttesterSlashingAdded))
+      onElectraAttesterSlashingAdded, onExecutionPayloadHeaderReceived,
+      onPayloadAttestationReceived,
+      onExecutionPayloadEnvelopeReceived))
     blobQuarantine = newClone(BlobQuarantine.init(
       dag.cfg, onBlobSidecarAdded))
     dataColumnQuarantine = newClone(DataColumnQuarantine.init())
@@ -1040,7 +1051,9 @@ proc init*(T: type BeaconNode,
     validatorMonitor: validatorMonitor,
     stateTtlCache: stateTtlCache,
     shutdownEvent: newAsyncEvent(),
-    dynamicFeeRecipientsStore: newClone(DynamicFeeRecipientsStore.init()))
+    dynamicFeeRecipientsStore: newClone(DynamicFeeRecipientsStore.init()),
+    payloadCache: initTable[Slot, fulu.ExecutionPayloadForSigning](),
+    envelopeCache: initTable[Eth2Digest, fulu.SignedExecutionPayloadEnvelope]())
 
   node.initLightClient(
     rng, cfg, dag.forkDigests, getBeaconTime, dag.genesis_validators_root)

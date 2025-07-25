@@ -1072,16 +1072,31 @@ proc process_execution_payload*(
     notify_new_payload: fulu.ExecutePayload,
     verify: bool = true): Result[void, cstring] =
   
+  debug "🚀 Starting process_execution_payload validation",
+    slot = signed_envelope.message.slot,
+    builder_index = signed_envelope.message.builder_index,
+    payload_withheld = signed_envelope.message.payload_withheld,
+    verify = verify
+  
   # Verify signature
   if verify:
+    debug "🔐 Verifying envelope signature"
     let envelope = signed_envelope.message
     let builder_index = ValidatorIndex.init(envelope.builder_index).valueOr:
+      debug "❌ Invalid builder index"
       return err("process_execution_payload: invalid builder index")
     
     if uint64(builder_index) >= lenu64(state.validators):
+      debug "❌ Builder index out of range", 
+        builder_index = uint64(builder_index),
+        validators_count = lenu64(state.validators)
       return err("process_execution_payload: builder index out of range")
     
     let builder_pubkey = state.validators.item(builder_index).pubkey
+    
+    debug "🔑 Checking signature with builder pubkey",
+      builder_index = uint64(builder_index),
+      builder_pubkey = shortLog(builder_pubkey)
     
     if not verify_execution_payload_envelope_signature(
         state.fork, 
@@ -1090,92 +1105,230 @@ proc process_execution_payload*(
         state,
         builder_pubkey,
         signed_envelope.signature):
+      debug "❌ Invalid envelope signature"
       return err("process_execution_payload: invalid envelope signature")
+    
+    debug "✅ Envelope signature verification passed"
   
   let envelope = signed_envelope.message
   let payload = envelope.payload
   
+  debug "📋 Basic envelope info",
+    envelope_slot = envelope.slot,
+    envelope_builder_index = envelope.builder_index,
+    payload_block_hash = shortLog(payload.block_hash),
+    payload_parent_hash = shortLog(payload.parent_hash),
+    payload_block_number = payload.block_number,
+    beacon_block_root = shortLog(envelope.beacon_block_root)
+  
   # Cache latest block header state root
   let previous_state_root = hash_tree_root(state)
   if state.latest_block_header.state_root == default(Eth2Digest):
+    debug "📝 Updating latest block header state root"
     state.latest_block_header.state_root = previous_state_root
   
+  debug "🏗️ Checking beacon block root consistency",
+    envelope_beacon_block_root = shortLog(envelope.beacon_block_root),
+    state_latest_block_header = shortLog(state.latest_block_header),
+    state_latest_block_header_root = shortLog(hash_tree_root(state.latest_block_header))
+  
   # Verify consistency with the beacon block
-  if not (envelope.beacon_block_root == 
-    hash_tree_root(state.latest_block_header)):
+  if not (envelope.beacon_block_root == hash_tree_root(state.latest_block_header)):
+    debug "❌ Beacon block root mismatch - FAILING HERE",
+      expected = shortLog(hash_tree_root(state.latest_block_header)),
+      got = shortLog(envelope.beacon_block_root)
     return err("process_execution_payload: beacon block root mismatch")
+  
+  debug "✅ Beacon block root check passed"
   
   # Verify consistency with the committed header
   let committed_header = state.latest_execution_payload_header
+  
+  debug "🎯 Checking consistency with committed header",
+    envelope_builder_index = envelope.builder_index,
+    committed_header_builder_index = committed_header.builder_index,
+    committed_header_block_hash = shortLog(committed_header.block_hash),
+    committed_header_blob_commitments_root = shortLog(committed_header.blob_kzg_commitments_root),
+    envelope_blob_commitments_root = shortLog(hash_tree_root(envelope.blob_kzg_commitments))
+  
   if not (envelope.builder_index == committed_header.builder_index):
+    debug "❌ Builder index mismatch with committed header"
     return err("process_execution_payload: builder index mismatch")
   
   if not (committed_header.blob_kzg_commitments_root == 
           hash_tree_root(envelope.blob_kzg_commitments)):
+    debug "❌ Blob commitments root mismatch with committed header"
     return err("process_execution_payload: blob commitments root mismatch")
   
+  debug "✅ Committed header consistency checks passed"
+  
   if not envelope.payload_withheld:
+    debug "🔍 Processing non-withheld payload"
+    
     # Verify the withdrawals root
-    if not (hash_tree_root(payload.withdrawals) == 
-      state.latest_withdrawals_root):
+    debug "💰 Checking withdrawals root",
+      payload_withdrawals_root = shortLog(hash_tree_root(payload.withdrawals)),
+      state_latest_withdrawals_root = shortLog(state.latest_withdrawals_root)
+    
+    if not (hash_tree_root(payload.withdrawals) == state.latest_withdrawals_root):
+      debug "❌ Withdrawals root mismatch"
       return err("process_execution_payload: withdrawals root mismatch")
     
+    debug "✅ Withdrawals root check passed"
+    
     # Verify the gas_limit
+    debug "⛽ Checking gas limit",
+      committed_header_gas_limit = committed_header.gas_limit,
+      payload_gas_limit = payload.gas_limit
+    
     if not (committed_header.gas_limit == payload.gas_limit):
+      debug "❌ Gas limit mismatch"
       return err("process_execution_payload: gas limit mismatch")
     
+    debug "✅ Gas limit check passed"
+    
+    # Verify block hash consistency
+    debug "🔗 Checking block hash consistency",
+      committed_header_block_hash = shortLog(committed_header.block_hash),
+      payload_block_hash = shortLog(payload.block_hash)
+    
     if not (committed_header.block_hash == payload.block_hash):
+      debug "❌ Block hash mismatch with committed header"
       return err("process_execution_payload: block hash mismatch")
     
-    # Verify consistency of the parent hash 
-    # with respect to the previous execution payload
+    debug "✅ Block hash consistency check passed"
+    
+    # THE CRITICAL CHECK - Verify consistency of the parent hash
+    debug "🔗 Checking parent hash consistency - CRITICAL CHECK",
+      envelope_parent_hash = shortLog(payload.parent_hash),
+      state_latest_block_hash = shortLog(state.latest_block_hash),
+      state_slot = state.slot,
+      envelope_slot = envelope.slot
+    
     if not (payload.parent_hash == state.latest_block_hash):
+      debug "❌ Parent hash mismatch - THIS IS THE MAIN ISSUE",
+        expected_parent = shortLog(state.latest_block_hash),
+        got_parent = shortLog(payload.parent_hash),
+        state_latest_full_slot = state.latest_full_slot
       return err("process_execution_payload: parent hash mismatch")
     
+    debug "✅ Parent hash check passed"
+    
     # Verify prev_randao
-    if not (payload.prev_randao == 
-      get_randao_mix(state, get_current_epoch(state))):
+    let expected_randao = get_randao_mix(state, get_current_epoch(state))
+    debug "🎲 Detailed randao analysis",
+      envelope_slot = envelope.slot,
+      state_slot = state.slot,
+      envelope_epoch = envelope.slot.epoch,
+      state_current_epoch = get_current_epoch(state),
+      payload_prev_randao = shortLog(payload.prev_randao),
+      expected_randao = shortLog(expected_randao),
+      state_randao_at_current_epoch = shortLog(get_randao_mix(state, get_current_epoch(state))),
+      state_randao_at_envelope_epoch = shortLog(get_randao_mix(state, envelope.slot.epoch)),
+      are_epochs_same = (envelope.slot.epoch == get_current_epoch(state))
+
+    debug "🎲 Checking prev_randao",
+      payload_prev_randao = shortLog(payload.prev_randao),
+      expected_randao = shortLog(expected_randao)
+    
+    if not (payload.prev_randao == expected_randao):
+      debug "❌ Prev_randao mismatch"
       return err("process_execution_payload: prev_randao mismatch")
     
+    debug "✅ Prev_randao check passed"
+    
     # Verify timestamp
-    if not (payload.timestamp == 
-      compute_timestamp_at_slot(state, state.slot)):
+    let expected_timestamp = compute_timestamp_at_slot(state, state.slot)
+    debug "⏰ Checking timestamp",
+      payload_timestamp = payload.timestamp,
+      expected_timestamp = expected_timestamp
+    
+    if not (payload.timestamp == expected_timestamp):
+      debug "❌ Timestamp mismatch"
       return err("process_execution_payload: timestamp mismatch")
     
+    debug "✅ Timestamp check passed"
+    
     # Verify commitments are under limit
+    debug "📊 Checking blob commitments limit",
+      commitments_count = lenu64(envelope.blob_kzg_commitments),
+      max_allowed = cfg.MAX_BLOBS_PER_BLOCK
+    
     if not (lenu64(envelope.blob_kzg_commitments) <= cfg.MAX_BLOBS_PER_BLOCK):
+      debug "❌ Too many blob commitments"
       return err("process_execution_payload: too many blob commitments")
     
-    # Verify the execution payload is valid
+    debug "✅ Blob commitments limit check passed"
+    
+    # Verify the execution payload is valid - CALL TO EL
+    debug "🔌 Calling execution layer validation (notify_new_payload)"
+    
     if not notify_new_payload(payload):
+      debug "❌ Execution layer validation failed"
       return err("process_execution_payload: execution payload invalid")
     
+    debug "✅ Execution layer validation passed"
+    
     # Process Electra operations
+    debug "⚙️ Processing execution requests",
+      deposits_count = envelope.execution_requests.deposits.len,
+      withdrawals_count = envelope.execution_requests.withdrawals.len,
+      consolidations_count = envelope.execution_requests.consolidations.len
+    
     let requests = envelope.execution_requests
     for deposit_request in requests.deposits:
-      ? process_deposit_request(cfg, state, deposit_request, {})
+      let result = process_deposit_request(cfg, state, deposit_request, {})
+      if result.isErr:
+        debug "❌ Failed to process deposit request", error = result.error
+        return result
     
     var cache: StateCache
     let bsv = sortValidatorBuckets(state.validators.asSeq)
     for withdrawal_request in requests.withdrawals:
-      process_withdrawal_request(
-        cfg, state, bsv[], withdrawal_request, cache)
+      process_withdrawal_request(cfg, state, bsv[], withdrawal_request, cache)
     
     for consolidation_request in requests.consolidations:
-      process_consolidation_request(
-        cfg, state, bsv[], consolidation_request, cache)
+      process_consolidation_request(cfg, state, bsv[], consolidation_request, cache)
+    
+    debug "✅ Execution requests processed"
     
     # Cache the execution payload header and proposer
+    let oldBlockHash = state.latest_block_hash
+    let oldFullSlot = state.latest_full_slot
+    
     state.latest_block_hash = payload.block_hash
     state.latest_full_slot = state.slot
+    
+    debug "📝 Updated state after successful payload processing",
+      old_latest_block_hash = shortLog(oldBlockHash),
+      new_latest_block_hash = shortLog(state.latest_block_hash),
+      old_latest_full_slot = oldFullSlot,
+      new_latest_full_slot = state.latest_full_slot
+  else:
+    debug "⏭️ Payload withheld - skipping payload-specific validations"
   
   # Verify the state root
   if verify:
-    if not (envelope.state_root == hash_tree_root(state)):
+    let computed_state_root = hash_tree_root(state)
+    debug "🏗️ Verifying final state root",
+      envelope_state_root = shortLog(envelope.state_root),
+      computed_state_root = shortLog(computed_state_root)
+    
+    if not (envelope.state_root == computed_state_root):
+      debug "❌ State root mismatch - final check failed",
+        expected = shortLog(computed_state_root),
+        got = shortLog(envelope.state_root)
       return err("process_execution_payload: state root mismatch")
+    
+    debug "✅ State root verification passed"
+  
+  debug "🎉 process_execution_payload completed successfully",
+    slot = envelope.slot,
+    builder_index = envelope.builder_index,
+    final_latest_block_hash = shortLog(state.latest_block_hash)
   
   ok()
-
+  
 # copy of datatypes/fulu.nim
 type SomeFuluBeaconBlock =
   fulu.BeaconBlock | fulu.SigVerifiedBeaconBlock |
@@ -1224,9 +1377,27 @@ proc process_execution_payload_header*(
   if not (header.slot == blck.slot):
     return err("process_execution_payload_header: header slot mismatch")
  
-  # Verify that the bid is for the right parent block
+  
+# Add this debug logging to your process_execution_payload_header function:
+
+  debug "Header parent hash validation details",
+    header_parent_block_hash = shortLog(header.parent_block_hash),
+    state_latest_block_hash = shortLog(state.latest_block_hash),
+    header_slot = header.slot,
+    state_slot = state.slot,
+    builder_index = header.builder_index,
+    block_parent_root = shortLog(blck.parent_root)
+
+  # Add this right before the parent block hash check:
   if not (header.parent_block_hash == state.latest_block_hash):
-    return err("process_execution_payload_header: parent block hash mismatch")
+    warn "Header parent hash mismatch - detailed info",
+      expected_parent_hash = shortLog(state.latest_block_hash),
+      got_parent_hash = shortLog(header.parent_block_hash),
+      state_latest_full_slot = state.latest_full_slot,
+      header_slot = header.slot,
+      builder_index = header.builder_index
+    return err("process_execution_payload_header: parent block hash mismatch") 
+
  
   if not (header.parent_block_root == blck.parent_root):
     return err("process_execution_payload_header: parent block root mismatch")

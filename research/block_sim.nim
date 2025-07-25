@@ -89,7 +89,6 @@ proc makeSimulationBlock(
   blck.state_root = state.root
 
   ok(blck)
-
 proc makeSimulationBlock(
     cfg: RuntimeConfig,
     state: var fulu.HashedBeaconState,
@@ -104,7 +103,6 @@ proc makeSimulationBlock(
     cache: var StateCache,
     verificationFlags: UpdateFlags = {}): Result[fulu.BeaconBlock, cstring] =
   
-  # Get the proposer's private key
   let builderPrivKey = MockPrivKeys[proposer_index]
   
   let executionPayloadHeader = fulu.ExecutionPayloadHeader(
@@ -119,13 +117,11 @@ proc makeSimulationBlock(
       hash_tree_root(execution_payload.blobsBundle.commitments)
   )
   
-  # Create unsigned header for signing
   let unsignedHeader = fulu.SignedExecutionPayloadHeader(
     message: executionPayloadHeader,
     signature: default(ValidatorSig)
   )
   
-  # Sign the header using the same pattern as the main code
   let headerSignature = get_execution_payload_header_signature(
     state.data.fork,
     state.data.genesis_validators_root,
@@ -134,13 +130,16 @@ proc makeSimulationBlock(
     builderPrivKey
   )
   
-  # Create the block using partialBeaconBlock with the signature
+  let signedHeader = fulu.SignedExecutionPayloadHeader(
+    message: executionPayloadHeader,
+    signature: headerSignature.toValidatorSig()
+  )
+  
   var blck = partialBeaconBlock(
     cfg, state, proposer_index, randao_reveal, Eth1Data(),
     default(GraffitiBytes), attestations, @[], exits, sync_aggregate,
-    execution_payload, ExecutionRequests(), headerSignature.toValidatorSig())
+    execution_payload, ExecutionRequests(), signedHeader)
   
-  # Process the block
   let res = process_block(
     cfg, state.data, blck.asSigVerified(), verificationFlags, cache)
   
@@ -148,13 +147,11 @@ proc makeSimulationBlock(
     rollback(state)
     return err(res.error())
   
-  # Update state root
   state.root = hash_tree_root(state.data)
   blck.state_root = state.root
   
   ok(blck)
 
-# TODO confutils is an impenetrable black box. how can a help text be added here?
 cli do(slots = SLOTS_PER_EPOCH * 7,
        validators = SLOTS_PER_EPOCH * 500,
        attesterRatio {.desc: "ratio of validators that attest in each round"} = 0.82,

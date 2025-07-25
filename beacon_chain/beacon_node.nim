@@ -121,6 +121,15 @@ type
     lastValidAttestedBlock*: Opt[BlockSlot]
     shutdownEvent*: AsyncEvent
 
+    # new fields to store payloads for later envelope broadcast
+    payloadCache*: Table[Slot, fulu.ExecutionPayloadForSigning]
+    envelopeCache*: Table[Eth2Digest, fulu.SignedExecutionPayloadEnvelope]
+    # [TODO]
+    # seperate cache for execution requests to prevent repiting the parsing logic
+    # logic that parses the execution requests into an `ExecutionRequests` object,
+    # adding the Payload field to the EngineBid object might be a cleaner solution
+    executionRequestsCache*: Table[Slot, ExecutionRequests]
+
 template findIt*(s: openArray, predicate: untyped): int =
   var res = -1
   for i, it {.inject.} in s:

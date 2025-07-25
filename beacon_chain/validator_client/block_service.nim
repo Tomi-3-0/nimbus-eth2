@@ -579,7 +579,7 @@ proc runBlockPollMonitor(service: BlockServiceRef,
     vc = service.client
     roles = {BeaconNodeRole.BlockProposalData}
     statuses = {RestBeaconNodeStatus.Synced}
-    afterSlot = currentTime.slotOrZero()
+    afterSlot = vc.currentSlot()
     afterFulu = vc.isPastFuluFork(afterSlot.epoch)
     attestationDeadline = if afterFulu:
       afterSlot.attestation_deadline_eip7732()

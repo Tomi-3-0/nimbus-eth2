@@ -20,20 +20,21 @@ from ../consensus_object_pools/consensus_manager import
   updateHeadWithExecution
 from ../consensus_object_pools/blockchain_dag import
   getBlockRef, getForkedBlock, getProposer, forkAtEpoch, loadExecutionBlockHash,
-  markBlockVerified, validatorKey, is_optimistic
+  markBlockVerified, validatorKey, is_optimistic, updateState
 from ../beacon_clock import GetBeaconTimeFn, toFloatSeconds
 from ../consensus_object_pools/block_dag import BlockRef, root, shortLog, slot
 from ../consensus_object_pools/block_pools_types import
   EpochRef, VerifierError
 from ../consensus_object_pools/block_quarantine import
   addBlobless, addOrphan, addUnviable, pop, removeOrphan
+from ../consensus_object_pools/attestation_pool import getBeaconHead
 from ../consensus_object_pools/blob_quarantine import
   BlobQuarantine, popSidecars, put
 from ../validators/validator_monitor import
   MsgSource, ValidatorMonitor, registerAttestationInBlock, registerBeaconBlock,
   registerSyncAggregateInBlock
 from ../beacon_chain_db import getBlobSidecar, putBlobSidecar
-from ../spec/state_transition_block import validate_blobs
+from ../spec/state_transition_block import validate_blobs, process_execution_payload
 
 export sszdump, signatures_batch
 
@@ -1064,3 +1065,144 @@ proc runQueueProcessingLoop*(self: ref BlockProcessor) {.async.} =
     discard await idleAsync().withTimeout(idleTimeout)
 
     await self.processBlock(await self[].blockQueue.popFirst())
+
+proc processExecutionPayloadEnvelope*(
+    self: ref BlockProcessor,
+    src: MsgSource,
+    signedEnvelope: SignedExecutionPayloadEnvelope
+) {.async: (raises: [CancelledError]).} =
+  let
+    envelope = signedEnvelope.message
+    dag = self.consensusManager.dag
+    wallTime = self.getBeaconTime()
+    consensusManager = self.consensusManager
+  
+  logScope:
+    beacon_block_root = shortLog(envelope.beacon_block_root)
+    builder_index = envelope.builder_index
+    payload_withheld = envelope.payload_withheld
+    slot = envelope.slot
+  
+  # Get the beacon block reference - it should already be in the DAG
+  let blockRef = dag.getBlockRef(envelope.beacon_block_root).valueOr:
+    debug "Beacon block not found for payload envelope"
+    return
+  
+  # Verify this block is recent enough to matter
+  if blockRef.slot + SLOTS_PER_EPOCH < wallTime.slotOrZero():
+    debug "Execution payload envelope for old block", blockSlot = blockRef.slot
+    return
+  
+  # CORRECT FIX: Get the state AFTER the block was fully processed
+  # The envelope must be processed against the state that includes header processing
+  let tmpState = assignClone(dag.headState)
+  
+  # Key fix: Update to the state AFTER this block was applied
+  # Use the block itself as the target, not just atSlot()
+  var cache = StateCache()
+  let targetStateId = blockRef.bid  # This is the state after this block
+  
+  debug "Updating state for envelope processing",
+    currentHeadSlot = dag.head.slot,
+    targetBlockSlot = blockRef.slot,
+    blockRoot = shortLog(blockRef.root),
+    targetStateId = shortLog(targetStateId)
+  
+  if not dag.updateState(tmpState[], targetStateId.atSlot(), false, cache, dag.updateFlags):
+    warn "Failed to update state to target block for envelope processing",
+      targetBlock = shortLog(blockRef.bid),
+      targetSlot = blockRef.slot
+    return
+  
+  let currentStateSlot = withState(tmpState[]):
+    forkyState.data.slot
+  
+  debug "Retrieved state for envelope processing",
+    blockRef = shortLog(blockRef.bid),
+    stateSlot = currentStateSlot,
+    isHeadBlock = (blockRef == dag.head)
+  
+  # Process the execution payload with state transition
+  withState(tmpState[]):
+    when consensusFork >= ConsensusFork.Fulu:
+      debug "Processing envelope in Fulu fork"
+      
+      debug "Parent hash validation details",
+        envelope_parent_hash = shortLog(signedEnvelope.message.payload.parent_hash),
+        state_latest_block_hash = shortLog(forkyState.data.latest_block_hash),
+        committed_header_block_hash = shortLog(forkyState.data.latest_execution_payload_header.block_hash),
+        state_slot = forkyState.data.slot,
+        envelope_slot = signedEnvelope.message.slot,
+        beacon_block_root = shortLog(signedEnvelope.message.beacon_block_root)
+
+      let processResult = process_execution_payload(
+        dag.cfg,
+        forkyState.data,
+        signedEnvelope,
+        proc(payload: fulu.ExecutionPayload): bool =
+          # Validate with execution client
+          debug "Validating payload with execution client",
+            blockHash = shortLog(payload.block_hash),
+            blockNumber = payload.block_number
+          
+          let elManager = consensusManager.elManager
+          try:
+            let payloadStatus = waitFor elManager.newExecutionPayloadEnvelope(
+              signedEnvelope)
+            let isValid = payloadStatus.isSome and 
+                         payloadStatus.get() == PayloadExecutionStatus.valid
+            
+            debug "Execution client validation result", 
+              isValid = isValid,
+              status = if payloadStatus.isSome: $payloadStatus.get() else: "none"
+            
+            return isValid
+          except CatchableError as e:
+            warn "Exception during execution client validation", 
+              error = e.msg,
+              blockHash = shortLog(payload.block_hash)
+            return false,
+        verify = true
+      )
+      
+      if processResult.isErr:
+        warn "Failed to process execution payload",
+          error = processResult.error(),
+          beacon_block_root = shortLog(envelope.beacon_block_root),
+          builder_index = envelope.builder_index,
+          slot = envelope.slot
+        return
+      
+      debug "Execution payload processed successfully"
+      
+      # Update fork choice if payload wasn't withheld
+      if not envelope.payload_withheld:
+        debug "Updating fork choice for non-withheld payload"
+        
+        let
+          attestationPool = self.consensusManager.attestationPool
+          beaconHead = attestationPool[].getBeaconHead(dag.head)
+          safeBlockHash = beaconHead.safeExecutionBlockHash
+          finalizedBlockHash = beaconHead.finalizedExecutionBlockHash
+        
+        discard await consensusManager.elManager.forkchoiceUpdated(
+          headBlockHash = envelope.payload.block_hash,
+          safeBlockHash = safeBlockHash,
+          finalizedBlockHash = finalizedBlockHash,
+          payloadAttributes = Opt.none(PayloadAttributesV3),
+          deadlineObj = DeadlineObject.init(FORKCHOICEUPDATED_TIMEOUT),
+          maxRetriesCount = 1
+        )
+        
+        debug "Fork choice updated"
+      
+      notice "Execution payload processed successfully",
+        beacon_block_root = shortLog(envelope.beacon_block_root),
+        payload_hash = shortLog(envelope.payload.block_hash),
+        slot = envelope.slot,
+        withheld = envelope.payload_withheld,
+        builder = envelope.builder_index
+    else:
+      # Pre-Fulu, this shouldn't happen
+      warn "Received execution payload envelope before Fulu fork",
+        consensusFork = consensusFork

@@ -24,7 +24,7 @@ import
   ../beacon_chain/spec/datatypes/[phase0, altair, bellatrix],
   ../beacon_chain/spec/[
     beaconstate, crypto, engine_authentication, forks, helpers,
-    signatures, state_transition],
+    signatures, eip7732_helpers, state_transition],
   ../beacon_chain/validators/[keystore_management, validator_pool]
 
 from ../beacon_chain/gossip_processing/block_processor import
@@ -117,7 +117,8 @@ cli do(validatorsDir: string, secretsDir: string,
       if forkyBlck.message.is_execution_block:
         when consensusFork >= ConsensusFork.Fulu:
           # For Fulu-epbs get payload info from header
-            template header(): auto = forkyBlck.message.body.signed_execution_payload_header.message
+            template header(): auto = 
+              forkyBlck.message.body.signed_execution_payload_header.message
             if not header.block_hash.isZero:
               notice "Syncing EL", elUrl, jwtSecret
               while true:
@@ -325,9 +326,16 @@ cli do(validatorsDir: string, secretsDir: string,
               proposerPrivkey).toValidatorSig())
 
         dump(".", signedBlock)
-        when consensusFork >= ConsensusFork.Deneb:
+        when consensusFork >= ConsensusFork.Deneb and consensusFork < ConsensusFork.Fulu:
           let blobs = signedBlock.create_blob_sidecars(
             payload.blobsBundle.proofs, payload.blobsBundle.blobs)
+          for blob in blobs:
+            dump(".", blob)
+        elif consensusFork == ConsensusFork.Fulu:
+          let blobs = signedBlock.create_blob_sidecars(
+            payload.blobsBundle.blobs,
+            payload.blobsBundle.commitments,
+            payload.blobsBundle.proofs)
           for blob in blobs:
             dump(".", blob)
 

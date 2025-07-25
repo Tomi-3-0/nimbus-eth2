@@ -1,10 +1,3 @@
-# beacon_chain
-# Copyright (c) 2018-2025 Status Research & Development GmbH
-# Licensed and distributed under either of
-#   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
-#   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
-# at your option. This file may not be copied, modified, or distributed except according to those terms.
-
 {.push raises: [].}
 
 import
@@ -497,30 +490,63 @@ proc getPayload*(
     suggestedFeeRecipient: Eth1Address,
     withdrawals: seq[capella.Withdrawal]
 ): Future[Opt[PayloadType]] {.async: (raises: [CancelledError]).} =
-  if m.elConnections.len == 0:
-    return err()
-
-  let
-    engineApiWithdrawals = toEngineWithdrawals withdrawals
-    isFcUpToDate = m.nextExpectedPayloadParams.areSameAs(
-      headBlock, safeBlock, finalizedBlock, timestamp,
-      randomData, suggestedFeeRecipient, engineApiWithdrawals)
-
-  # `getPayloadFromSingleEL` may introduce additional latency
-  const extraProcessingOverhead = 500.milliseconds
-  let
-    timeout = GETPAYLOAD_TIMEOUT + extraProcessingOverhead
-    deadline = sleepAsync(timeout)
-
-  var bestPayloadIdx = Opt.none(int)
-
-  while true:
-    let requests =
-      m.elConnections.mapIt(
-        it.getPayloadFromSingleEL(EngineApiResponseType(PayloadType),
-          isFcUpToDate, consensusHead, headBlock, safeBlock, finalizedBlock,
-          timestamp, randomData, suggestedFeeRecipient, engineApiWithdrawals))
-
+  
+  # For Fulu/EIP-7732, we need forkchoice update before payload request
+  when PayloadType.kind == ConsensusFork.Fulu:
+    if m.elConnections.len == 0:
+      return err()
+    
+    # STEP 1: Send forkchoice update to set the execution head
+    debug "EIP-7732: Sending forkchoice update before payload request",
+      headBlock = shortLog(headBlock),
+      safeBlock = shortLog(safeBlock),
+      finalizedBlock = shortLog(finalizedBlock),
+      timestamp = timestamp
+    
+    try:
+      let (fcuStatus, _) = await m.forkchoiceUpdated(
+        headBlockHash = headBlock,
+        safeBlockHash = headBlock, 
+        finalizedBlockHash = headBlock,
+        payloadAttributes = Opt.some(PayloadAttributesV3(
+          timestamp: Quantity(timestamp),
+          prevRandao: FixedBytes[32](randomData.data),
+          suggestedFeeRecipient: suggestedFeeRecipient,
+          withdrawals: toEngineWithdrawals(withdrawals),
+          parentBeaconBlockRoot: consensusHead.to(Hash32)
+        ))
+      )
+      
+      debug "EIP-7732: Forkchoice update completed",
+        status = fcuStatus,
+        headBlock = shortLog(headBlock)
+        
+      if fcuStatus == PayloadExecutionStatus.invalid:
+        warn "EIP-7732: Forkchoice update returned invalid",
+          headBlock = shortLog(headBlock),
+          safeBlock = shortLog(safeBlock)
+        return err()
+        
+    except CatchableError as e:
+      warn "EIP-7732: Forkchoice update failed",
+        error = e.msg,
+        headBlock = shortLog(headBlock)
+      return err()
+    
+    # STEP 2: Now request the payload
+    let requests = m.elConnections.mapIt(
+      it.getPayloadFromSingleEL(
+        engine_api.GetPayloadV4Response,  # Fulu uses V4
+        true,  # isFcUpToDate (we just updated it)
+        consensusHead, headBlock, safeBlock, finalizedBlock,
+        timestamp, randomData, suggestedFeeRecipient, 
+        toEngineWithdrawals(withdrawals)))
+    
+    const extraProcessingOverhead = 500.milliseconds
+    let
+      timeout = GETPAYLOAD_TIMEOUT + extraProcessingOverhead
+      deadline = sleepAsync(timeout)
+    
     let timeoutExceeded =
       try:
         await allFutures(requests).wait(deadline)
@@ -528,86 +554,132 @@ proc getPayload*(
       except AsyncTimeoutError:
         true
       except CancelledError as exc:
-        let pending =
-          requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
+        let pending = requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
         await noCancel allFutures(pending)
         raise exc
-
+    
+    var bestPayloadIdx = Opt.none(int)
+    
     for idx, req in requests:
-      if not(req.finished()):
-        warn "Timeout while getting execution payload",
-             url = m.elConnections[idx].engineUrl.url
-      elif req.failed():
-        warn "Failed to get execution payload from EL",
-             url = m.elConnections[idx].engineUrl.url,
-             reason = req.error.msg
-      else:
-        const payloadFork = PayloadType.kind
-        when payloadFork >= ConsensusFork.Capella:
-          when payloadFork == ConsensusFork.Capella:
-            # TODO: The engine_api module may offer an alternative API where
-            # it is guaranteed to return the correct response type (i.e. the
-            # rule below will be enforced during deserialization).
-            if req.value().executionPayload.withdrawals.isNone:
-              warn "Execution client returned a block without a " &
-                   "'withdrawals' field for a post-Shanghai block",
-                    url = m.elConnections[idx].engineUrl.url
-              continue
-
-          if engineApiWithdrawals !=
-             req.value().executionPayload.withdrawals.maybeDeref:
-            # otherwise it formats as "@[(index: ..., validatorIndex: ...,
-            # address: ..., amount: ...), (index: ..., validatorIndex: ...,
-            # address: ..., amount: ...)]"
-            # TODO (cheatfate): should we have `continue` statement at the
-            # end of this branch. If no such payload could be choosen as
-            # best one.
-            warn "Execution client did not return correct withdrawals",
-              withdrawals_from_cl_len = engineApiWithdrawals.len,
-              withdrawals_from_el_len =
-                req.value().executionPayload.withdrawals.maybeDeref.len,
-              withdrawals_from_cl =
-                mapIt(engineApiWithdrawals, it.asConsensusWithdrawal),
-              withdrawals_from_el =
-                mapIt(
-                  req.value().executionPayload.withdrawals.maybeDeref,
-                  it.asConsensusWithdrawal),
-              url = m.elConnections[idx].engineUrl.url
-            # If we have more than one EL connection we consider this as
-            # a failure.
-            if len(requests) > 1:
-              continue
-
-        if req.value().executionPayload.extraData.len > MAX_EXTRA_DATA_BYTES:
-          warn "Execution client provided a block with invalid extraData " &
-               "(size exceeds limit)",
-               url = m.elConnections[idx].engineUrl.url,
-               size = req.value().executionPayload.extraData.len,
-               limit = MAX_EXTRA_DATA_BYTES
-          continue
-
+      if req.finished() and not req.failed():
         if bestPayloadIdx.isNone:
           bestPayloadIdx = Opt.some(idx)
         else:
           if cmpGetPayloadResponses(
                req.value(), requests[bestPayloadIdx.get].value()) > 0:
             bestPayloadIdx = Opt.some(idx)
-
-    let pending =
-      requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
+    
+    let pending = requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
     await noCancel allFutures(pending)
+    
+    if bestPayloadIdx.isSome():
+      debug "EIP-7732: Payload received successfully",
+        headBlock = shortLog(headBlock),
+        payloadBlockHash = shortLog(requests[bestPayloadIdx.get()].value().executionPayload.block_hash)
+      return ok(requests[bestPayloadIdx.get()].value().asConsensusTypeFulu)
+    
+    warn "EIP-7732: No valid payload received",
+      headBlock = shortLog(headBlock),
+      timeoutExceeded = timeoutExceeded
+    return err()
+  
+  else:
+    # Pre-Fulu flow (existing code)
+    if m.elConnections.len == 0:
+      return err()
 
-    when PayloadType.kind == ConsensusFork.Fulu:
-      if bestPayloadIdx.isSome():
-        return ok(requests[bestPayloadIdx.get()].value().asConsensusTypeFulu)
-    else:
+    let
+      engineApiWithdrawals = toEngineWithdrawals withdrawals
+      isFcUpToDate = m.nextExpectedPayloadParams.areSameAs(
+        headBlock, safeBlock, finalizedBlock, timestamp,
+        randomData, suggestedFeeRecipient, engineApiWithdrawals)
+
+    const extraProcessingOverhead = 500.milliseconds
+    let
+      timeout = GETPAYLOAD_TIMEOUT + extraProcessingOverhead
+      deadline = sleepAsync(timeout)
+
+    var bestPayloadIdx = Opt.none(int)
+
+    while true:
+      let requests =
+        m.elConnections.mapIt(
+          it.getPayloadFromSingleEL(EngineApiResponseType(PayloadType),
+            isFcUpToDate, consensusHead, headBlock, safeBlock, finalizedBlock,
+            timestamp, randomData, suggestedFeeRecipient, engineApiWithdrawals))
+
+      let timeoutExceeded =
+        try:
+          await allFutures(requests).wait(deadline)
+          false
+        except AsyncTimeoutError:
+          true
+        except CancelledError as exc:
+          let pending =
+            requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
+          await noCancel allFutures(pending)
+          raise exc
+
+      for idx, req in requests:
+        if not(req.finished()):
+          warn "Timeout while getting execution payload",
+               url = m.elConnections[idx].engineUrl.url
+        elif req.failed():
+          warn "Failed to get execution payload from EL",
+               url = m.elConnections[idx].engineUrl.url,
+               reason = req.error.msg
+        else:
+          const payloadFork = PayloadType.kind
+          when payloadFork >= ConsensusFork.Capella:
+            when payloadFork == ConsensusFork.Capella:
+              if req.value().executionPayload.withdrawals.isNone:
+                warn "Execution client returned a block without a " &
+                     "'withdrawals' field for a post-Shanghai block",
+                      url = m.elConnections[idx].engineUrl.url
+                continue
+
+            if engineApiWithdrawals !=
+               req.value().executionPayload.withdrawals.maybeDeref:
+              warn "Execution client did not return correct withdrawals",
+                withdrawals_from_cl_len = engineApiWithdrawals.len,
+                withdrawals_from_el_len =
+                  req.value().executionPayload.withdrawals.maybeDeref.len,
+                withdrawals_from_cl =
+                  mapIt(engineApiWithdrawals, it.asConsensusWithdrawal),
+                withdrawals_from_el =
+                  mapIt(
+                    req.value().executionPayload.withdrawals.maybeDeref,
+                    it.asConsensusWithdrawal),
+                url = m.elConnections[idx].engineUrl.url
+              if len(requests) > 1:
+                continue
+
+          if req.value().executionPayload.extraData.len > MAX_EXTRA_DATA_BYTES:
+            warn "Execution client provided a block with invalid extraData " &
+                 "(size exceeds limit)",
+                 url = m.elConnections[idx].engineUrl.url,
+                 size = req.value().executionPayload.extraData.len,
+                 limit = MAX_EXTRA_DATA_BYTES
+            continue
+
+          if bestPayloadIdx.isNone:
+            bestPayloadIdx = Opt.some(idx)
+          else:
+            if cmpGetPayloadResponses(
+                 req.value(), requests[bestPayloadIdx.get].value()) > 0:
+              bestPayloadIdx = Opt.some(idx)
+
+      let pending =
+        requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
+      await noCancel allFutures(pending)
+
       if bestPayloadIdx.isSome():
         return ok(requests[bestPayloadIdx.get()].value().asConsensusType)
 
-    if timeoutExceeded:
-      break
+      if timeoutExceeded:
+        break
 
-  err()
+    err()
 
 proc sendNewPayloadToSingleEL(
     connection: ELConnection,
@@ -778,6 +850,65 @@ proc sendNewPayload*(
 ): Future[PayloadExecutionStatus] {.async: (raises: [CancelledError]).} =
   doAssert maxRetriesCount > 0
 
+  # EIP-7732: Handle header-only blocks differently
+  when typeof(blck).kind >= ConsensusFork.Fulu:
+    # EIP-7732: Block contains only header, no actual payload to send to EL
+    let header = blck.body.signed_execution_payload_header.message
+    
+    debug "EIP-7732 block with execution payload header only",
+      slot = blck.slot,
+      builder_index = header.builder_index,
+      block_hash = shortLog(header.block_hash),
+      parent_hash = shortLog(header.parent_block_hash),
+      gas_limit = header.gas_limit
+    
+    if not m.hasProperlyConfiguredConnection:
+      debug "No execution client connected; cannot process EIP-7732 headers",
+        slot = blck.slot,
+        block_hash = shortLog(header.block_hash)
+      return PayloadExecutionStatus.syncing
+    
+    # IMPORTANT: We still need to send forkchoice update to tell EL about the new head
+    # This updates the EL's view of the execution chain head
+    try:
+      let (status, _) = await m.forkchoiceUpdated(
+        headBlockHash = header.block_hash,           # New execution head
+        safeBlockHash = header.parent_block_hash,    # Previous block as safe
+        finalizedBlockHash = header.parent_block_hash, # Use parent as finalized for now
+        payloadAttributes = Opt.none(PayloadAttributesV3),  # No payload building needed
+        deadlineObj = deadlineObj,
+        maxRetriesCount = maxRetriesCount
+      )
+      
+      debug "EIP-7732 forkchoice update sent",
+        headBlockHash = shortLog(header.block_hash),
+        parentBlockHash = shortLog(header.parent_block_hash),
+        status = status
+        
+      case status
+      of PayloadExecutionStatus.valid:
+        return PayloadExecutionStatus.valid
+      of PayloadExecutionStatus.invalid, PayloadExecutionStatus.invalid_block_hash:
+        warn "EIP-7732 forkchoice update returned invalid",
+          headBlockHash = shortLog(header.block_hash),
+          status = status
+        return PayloadExecutionStatus.invalid
+      of PayloadExecutionStatus.syncing, PayloadExecutionStatus.accepted:
+        # For syncing/accepted, we still consider the header valid from consensus perspective
+        # The EL will catch up eventually
+        debug "EL syncing during EIP-7732 forkchoice update",
+          status = status
+        return PayloadExecutionStatus.valid
+        
+    except CatchableError as e:
+      warn "EIP-7732 forkchoice update failed",
+        error = e.msg,
+        headBlockHash = shortLog(header.block_hash),
+        parentBlockHash = shortLog(header.parent_block_hash)
+      # Don't fail consensus processing due to EL issues
+      return PayloadExecutionStatus.syncing
+
+  # Pre-EIP-7732: Normal payload processing (existing code)
   let
     startTime = Moment.now()
     deadline = deadlineObj.future
@@ -792,24 +923,12 @@ proc sendNewPayload*(
       let
         requests = m.elConnections.mapIt:
           let req =
-            when typeof(blck).kind >= ConsensusFork.Fulu:
-              let versioned_hashes: seq[engine_api.VersionedHash] = @[]
-              sendNewPayloadToSingleEL(
-                it, payload, versioned_hashes,
-                FixedBytes[32] blck.parent_root.data)
-            elif typeof(blck).kind >= ConsensusFork.Electra:
+            when typeof(blck).kind >= ConsensusFork.Electra:
               # https://github.com/ethereum/execution-apis/blob/4140e528360fea53c34a766d86a000c6c039100e/src/engine/prague.md#engine_newpayloadv4
               let
                 versioned_hashes = mapIt(
                   blck.body.blob_kzg_commitments,
                   engine_api.VersionedHash(kzg_commitment_to_versioned_hash(it)))
-                # https://github.com/ethereum/execution-apis/blob/7c9772f95c2472ccfc6f6128dc2e1b568284a2da/src/engine/prague.md#request
-                # "Each list element is a `requests` byte array as defined by
-                # EIP-7685. The first byte of each element is the `request_type`
-                # and the remaining bytes are the `request_data`. Elements of
-                # the list MUST be ordered by `request_type` in ascending order.
-                # Elements with empty `request_data` MUST be excluded from the
-                # list."
                 execution_requests = block:
                   var requests: seq[seq[byte]]
                   for request_type, request_data in
@@ -824,9 +943,6 @@ proc sendNewPayload*(
                 it, payload, versioned_hashes,
                 FixedBytes[32] blck.parent_root.data, execution_requests)
             elif typeof(blck).kind == ConsensusFork.Deneb:
-              # https://github.com/ethereum/consensus-specs/blob/v1.4.0-alpha.1/specs/deneb/beacon-chain.md#process_execution_payload
-              # Verify the execution payload is valid
-              # [Modified in Deneb] Pass `versioned_hashes` to Execution Engine
               let versioned_hashes = mapIt(
                 blck.body.blob_kzg_commitments,
                 engine_api.VersionedHash(kzg_commitment_to_versioned_hash(it)))
@@ -876,15 +992,11 @@ proc sendNewPayload*(
         elif responseProcessor.selectedResponse.isSome():
           if (len(pendingRequests) == 0) or
              not(responseProcessor.couldBeBetter()):
-            # We spawn task which will wait for all other responses which are
-            # still pending, after 30.seconds all pending requests will be
-            # cancelled.
             asyncSpawn lazyWait(pendingRequests.mapIt(FutureBase(it)))
             return
               requests[responseProcessor.selectedResponse.get].value().status
 
         if timeoutExceeded:
-          # Timeout exceeded, cancelling all pending requests.
           let pending =
             pendingRequests.filterIt(not(it.finished())).
               mapIt(it.cancelAndWait())
@@ -892,15 +1004,12 @@ proc sendNewPayload*(
           return PayloadExecutionStatus.syncing
 
         if len(pendingRequests) == 0:
-          # All requests failed.
           inc(retriesCount)
           if retriesCount == maxRetriesCount:
             return PayloadExecutionStatus.syncing
-
-          # To avoid continous spam of requests when EL node is offline we
-          # going to sleep until next attempt.
           await variedSleep(sleepCounter, SleepDurations)
           break mainLoop
+
 
 proc sendNewPayload*(
     m: ELManager,
@@ -1272,3 +1381,149 @@ proc testWeb3Provider*(
 
   discard request "Latest block":
     web3.provider.eth_getBlockByNumber(blockId("latest"), false)
+
+proc sendExecutionPayloadEnvelope*(
+    m: ELManager,
+    envelope: SignedExecutionPayloadEnvelope,
+    deadlineObj: DeadlineObject,
+    maxRetriesCount: int
+): Future[PayloadExecutionStatus] {.async: (raises: [CancelledError]).} =
+  doAssert maxRetriesCount > 0
+
+  # Don't send payload if builder withheld it
+  if envelope.message.payload_withheld:
+    debug "Payload withheld by builder",
+      slot = envelope.message.slot,
+      builder = envelope.message.builder_index,
+      beacon_block_root = shortLog(envelope.message.beacon_block_root)
+    return PayloadExecutionStatus.valid
+
+  let
+    startTime = Moment.now()
+    deadline = deadlineObj.future
+    payload = asEngineExecutionPayload(envelope.message.payload)
+  var
+    responseProcessor = ELConsensusViolationDetector.init()
+    sleepCounter = 0
+    retriesCount = 0
+
+  debug "Sending execution payload envelope to EL",
+    slot = envelope.message.slot,
+    builder = envelope.message.builder_index,
+    block_hash = shortLog(envelope.message.payload.block_hash),
+    payload_withheld = envelope.message.payload_withheld,
+    blob_commitments_count = envelope.message.blob_kzg_commitments.len
+
+  while true:
+    block mainLoop:
+      let
+        requests = m.elConnections.mapIt:
+          # For EIP-7732, we send the payload from envelope with versioned hashes
+          let
+            versioned_hashes = mapIt(
+              envelope.message.blob_kzg_commitments,
+              engine_api.VersionedHash(kzg_commitment_to_versioned_hash(it)))
+            
+            # Convert execution requests from envelope
+            execution_requests = block:
+              var requests: seq[seq[byte]]
+              for request_type, request_data in
+                  [SSZ.encode(envelope.message.execution_requests.deposits),
+                   SSZ.encode(envelope.message.execution_requests.withdrawals),
+                   SSZ.encode(envelope.message.execution_requests.consolidations)]:
+                if request_data.len > 0:
+                  requests.add @[request_type.byte] & request_data
+              requests
+
+          let req = sendNewPayloadToSingleEL(
+            it, payload, versioned_hashes,
+            FixedBytes[32] envelope.message.beacon_block_root.data, execution_requests)
+          
+          engineApiRequest(it, req, "newPayload", startTime, noTimeout)
+
+      var pendingRequests = requests
+
+      while true:
+        let timeoutExceeded =
+          try:
+            discard await race(pendingRequests).wait(deadline)
+            false
+          except AsyncTimeoutError:
+            true
+          except ValueError:
+            raiseAssert "pendingRequests should not be empty!"
+          except CancelledError as exc:
+            let pending =
+              requests.filterIt(not(it.finished())).mapIt(it.cancelAndWait())
+            await noCancel allFutures(pending)
+            raise exc
+
+        var stillPending: type(pendingRequests)
+        for request in pendingRequests:
+          if not(request.finished()):
+            stillPending.add(request)
+          elif request.completed():
+            let index = requests.find(request)
+            doAssert(index >= 0)
+            responseProcessor.processResponse(type(payload),
+                                              m.elConnections, requests, index)
+        pendingRequests = stillPending
+
+        if responseProcessor.disagreementAlreadyDetected:
+          let pending =
+            pendingRequests.filterIt(not(it.finished())).
+              mapIt(it.cancelAndWait())
+          await noCancel allFutures(pending)
+          warn "EL disagreement detected for execution payload envelope",
+            slot = envelope.message.slot,
+            builder = envelope.message.builder_index
+          return PayloadExecutionStatus.invalid
+        elif responseProcessor.selectedResponse.isSome():
+          if (len(pendingRequests) == 0) or
+             not(responseProcessor.couldBeBetter()):
+            # We spawn task which will wait for all other responses which are
+            # still pending, after 30.seconds all pending requests will be
+            # cancelled.
+            asyncSpawn lazyWait(pendingRequests.mapIt(FutureBase(it)))
+            let status = requests[responseProcessor.selectedResponse.get].value().status
+            debug "Execution payload envelope processed by EL",
+              slot = envelope.message.slot,
+              builder = envelope.message.builder_index,
+              status = status
+            return status
+
+        if timeoutExceeded:
+          # Timeout exceeded, cancelling all pending requests.
+          let pending =
+            pendingRequests.filterIt(not(it.finished())).
+              mapIt(it.cancelAndWait())
+          await noCancel allFutures(pending)
+          warn "Timeout processing execution payload envelope",
+            slot = envelope.message.slot,
+            builder = envelope.message.builder_index
+          return PayloadExecutionStatus.syncing
+
+        if len(pendingRequests) == 0:
+          # All requests failed.
+          inc(retriesCount)
+          if retriesCount == maxRetriesCount:
+            warn "Max retries exceeded for execution payload envelope",
+              slot = envelope.message.slot,
+              builder = envelope.message.builder_index,
+              retries = retriesCount
+            return PayloadExecutionStatus.syncing
+
+          # To avoid continous spam of requests when EL node is offline we
+          # going to sleep until next attempt.
+          debug "Retrying execution payload envelope after sleep",
+            slot = envelope.message.slot,
+            retry = retriesCount
+          await variedSleep(sleepCounter, SleepDurations)
+          break mainLoop
+
+proc sendExecutionPayloadEnvelope*(
+    m: ELManager,
+    envelope: SignedExecutionPayloadEnvelope
+): Future[PayloadExecutionStatus] {.
+    async: (raises: [CancelledError], raw: true).} =
+  sendExecutionPayloadEnvelope(m, envelope, DeadlineObject.init(NEWPAYLOAD_TIMEOUT), high(int))

@@ -45,6 +45,15 @@ proc dump*(dir: string, v: BlobSidecar) =
       root = shortLog(v.hash_tree_root())
     SSZ.saveFile(dir / &"blob-{slot}-{blck}-{index}-{root}.ssz", v)
 
+proc dump*(dir: string, v: BlobSidecarEIP7732) =
+  logErrors:
+    let
+      slot = v.signed_block_header.message.slot
+      blck = shortLog(v.signed_block_header.message.hash_tree_root())
+      index = v.index
+      root = shortLog(v.hash_tree_root())
+    SSZ.saveFile(dir / &"blob-eip7732-{slot}-{blck}-{index}-{root}.ssz", v)
+
 proc dump*(dir: string, v: ForkyHashedBeaconState) =
   mixin saveFile
   logErrors:

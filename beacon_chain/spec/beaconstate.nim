@@ -2274,15 +2274,7 @@ func upgrade_to_fulu*(
     ref fulu.BeaconState =
   let
     epoch = get_current_epoch(pre)
-    latest_execution_payload_header = fulu.ExecutionPayloadHeader(
-      parent_block_hash: pre.latest_execution_payload_header.parent_hash,
-      parent_block_root: Eth2Digest(),
-      block_hash: pre.latest_execution_payload_header.block_hash,
-      gas_limit: 0.uint64,
-      builder_index: 0.uint64,
-      slot: pre.slot,
-      value: 0.Gwei,
-      blob_kzg_commitments_root: Eth2Digest())
+    latest_execution_payload_header = default(fulu.ExecutionPayloadHeader)
 
   let post = (ref fulu.BeaconState)(
     # Versioning
@@ -2333,7 +2325,7 @@ func upgrade_to_fulu*(
     current_sync_committee: pre.current_sync_committee,
     next_sync_committee: pre.next_sync_committee,
 
-    # Execution-layer
+    # Execution-layer - FIXED: Empty header according to spec
     latest_execution_payload_header: latest_execution_payload_header,
 
     # Withdrawals
@@ -2355,10 +2347,11 @@ func upgrade_to_fulu*(
     pending_deposits: pre.pending_deposits,
     pending_partial_withdrawals: pre.pending_partial_withdrawals,
     pending_consolidations: pre.pending_consolidations,
-    # [New fields in EIP7732]
+    
+    # [New fields in EIP7732] - FIXED: Use correct initialization
     latest_block_hash: pre.latest_execution_payload_header.block_hash,
     latest_full_slot: pre.slot,
-    latest_withdrawals_root: Eth2Digest()
+    latest_withdrawals_root: default(Eth2Digest)  # Empty hash according to spec
   )
 
   post

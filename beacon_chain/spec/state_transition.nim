@@ -467,28 +467,11 @@ func partialBeaconBlock*(
     sync_aggregate: SyncAggregate,
     execution_payload: fulu.ExecutionPayloadForSigning,
     execution_requests: ExecutionRequests,
-    execution_payload_header_signature: ValidatorSig
+    signed_execution_payload_header: fulu.SignedExecutionPayloadHeader
 ): fulu.BeaconBlock =
   
   # Calculate the parent block root from the latest block header
   let parent_block_root = hash_tree_root(state.data.latest_block_header)
-  
-  let executionPayloadHeader = fulu.ExecutionPayloadHeader(
-    parent_block_hash: execution_payload.executionPayload.parent_hash,
-    parent_block_root: parent_block_root,
-    block_hash: execution_payload.executionPayload.block_hash,
-    gas_limit: execution_payload.executionPayload.gas_limit,
-    builder_index: proposer_index.uint64,
-    slot: state.data.slot,
-    value: 0.Gwei,
-    blob_kzg_commitments_root:
-      hash_tree_root(execution_payload.blobsBundle.commitments)
-  )
-  
-  let signedHeader = fulu.SignedExecutionPayloadHeader(
-    message: executionPayloadHeader,
-    signature: execution_payload_header_signature
-  )
   
   fulu.BeaconBlock(
     slot: state.data.slot,
@@ -506,13 +489,13 @@ func partialBeaconBlock*(
       voluntary_exits: validator_changes.voluntary_exits,
       sync_aggregate: sync_aggregate,
       bls_to_execution_changes: validator_changes.bls_to_execution_changes,
-      signed_execution_payload_header: signedHeader,
+      signed_execution_payload_header: signed_execution_payload_header,
       payload_attestations:
         List[PayloadAttestation, Limit MAX_PAYLOAD_ATTESTATIONS](@[])
     )
   )
 
-proc makeBeaconBlockWithRewards*(
+proc makeBeaconBlockWithRewards(
     cfg: RuntimeConfig,
     state: var ForkedHashedBeaconState,
     proposer_index: ValidatorIndex,
@@ -531,19 +514,13 @@ proc makeBeaconBlockWithRewards*(
     execution_payload_root: Opt[Eth2Digest],
     kzg_commitments: Opt[KzgCommitments],
     execution_requests: ExecutionRequests,
-    execution_payload_header_signature: ValidatorSig
+    signed_execution_payload_header: fulu.SignedExecutionPayloadHeader
 ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
-  ## Create a block for the given state. The latest block applied to it will
-  ## be used for the parent_root value, and the slot will be take from
-  ## state.slot meaning process_slots must be called up to the slot for which
-  ## the block is to be created.
+  ## Create a block for the given state. EIP-7732 version with signed execution payload header.
 
   template makeBeaconBlock(
       kind: untyped
   ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
-    # To create a block, we'll first apply a partial block to the state, skipping
-    # some validations.
-
     var blck =
       ForkedBeaconBlock.init(
         partialBeaconBlock(
@@ -558,107 +535,53 @@ proc makeBeaconBlockWithRewards*(
       rollback(state)
       return err(res.error())
 
-    # Override for Builder API
+    # Builder API logic for pre-Fulu forks
     if transactions_root.isSome and execution_payload_root.isSome:
       withState(state):
         when consensusFork < ConsensusFork.Deneb:
-          # Nimbus doesn't support pre-Deneb builder API
           discard
         elif consensusFork == ConsensusFork.Deneb:
-          forkyState.data.latest_execution_payload_header.transactions_root =
-            transactions_root.get
-
+          forkyState.data.latest_execution_payload_header.transactions_root = transactions_root.get
           when executionPayload is deneb.ExecutionPayloadForSigning:
-            # https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.2/specs/deneb/beacon-chain.md#beaconblockbody
-            forkyState.data.latest_block_header.body_root = hash_tree_root(
-              [hash_tree_root(randao_reveal),
-               hash_tree_root(eth1_data),
-               hash_tree_root(graffiti),
-               hash_tree_root(validator_changes.proposer_slashings),
-               hash_tree_root(validator_changes.phase0_attester_slashings),
-               hash_tree_root(
-                 List[phase0.Attestation, Limit MAX_ATTESTATIONS](
-                   attestations)),
-               hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
-               hash_tree_root(validator_changes.voluntary_exits),
-               hash_tree_root(sync_aggregate),
-               execution_payload_root.get,
-               hash_tree_root(validator_changes.bls_to_execution_changes),
-               hash_tree_root(kzg_commitments.get)
-            ])
+            forkyState.data.latest_block_header.body_root = hash_tree_root([
+              hash_tree_root(randao_reveal), hash_tree_root(eth1_data), hash_tree_root(graffiti),
+              hash_tree_root(validator_changes.proposer_slashings),
+              hash_tree_root(validator_changes.phase0_attester_slashings),
+              hash_tree_root(List[phase0.Attestation, Limit MAX_ATTESTATIONS](attestations)),
+              hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
+              hash_tree_root(validator_changes.voluntary_exits), hash_tree_root(sync_aggregate),
+              execution_payload_root.get, hash_tree_root(validator_changes.bls_to_execution_changes),
+              hash_tree_root(kzg_commitments.get)])
           else:
             raiseAssert "Attempt to use non-Deneb payload with post-Deneb state"
         elif consensusFork == ConsensusFork.Electra:
-          forkyState.data.latest_execution_payload_header.transactions_root =
-            transactions_root.get
-
+          forkyState.data.latest_execution_payload_header.transactions_root = transactions_root.get
           when executionPayload is electra.ExecutionPayloadForSigning:
-            # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/electra/beacon-chain.md#beaconblockbody
-            forkyState.data.latest_block_header.body_root = hash_tree_root(
-              [hash_tree_root(randao_reveal),
-               hash_tree_root(eth1_data),
-               hash_tree_root(graffiti),
-               hash_tree_root(validator_changes.proposer_slashings),
-               hash_tree_root(validator_changes.electra_attester_slashings),
-               hash_tree_root(
-                 List[electra.Attestation, Limit MAX_ATTESTATIONS_ELECTRA](
-                   attestations)),
-               hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
-               hash_tree_root(validator_changes.voluntary_exits),
-               hash_tree_root(sync_aggregate),
-               execution_payload_root.get,
-               hash_tree_root(validator_changes.bls_to_execution_changes),
-               hash_tree_root(kzg_commitments.get),
-               hash_tree_root(execution_requests)
-            ])
+            forkyState.data.latest_block_header.body_root = hash_tree_root([
+              hash_tree_root(randao_reveal), hash_tree_root(eth1_data), hash_tree_root(graffiti),
+              hash_tree_root(validator_changes.proposer_slashings),
+              hash_tree_root(validator_changes.electra_attester_slashings),
+              hash_tree_root(List[electra.Attestation, Limit MAX_ATTESTATIONS_ELECTRA](attestations)),
+              hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
+              hash_tree_root(validator_changes.voluntary_exits), hash_tree_root(sync_aggregate),
+              execution_payload_root.get, hash_tree_root(validator_changes.bls_to_execution_changes),
+              hash_tree_root(kzg_commitments.get), hash_tree_root(execution_requests)])
           else:
-            raiseAssert "x"
-        elif consensusFork == ConsensusFork.Fulu:
-          # transaction root removed for epbs blocks
-          # forkyState.data.latest_execution_payload_header.transactions_root =
-          #   transactions_root.get
-
-          debugFuluComment "verify (again) that this is what builder API needs"
-          when executionPayload is fulu.ExecutionPayloadForSigning:
-            # https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.3/specs/electra/beacon-chain.md#beaconblockbody
-            forkyState.data.latest_block_header.body_root = hash_tree_root(
-              [hash_tree_root(randao_reveal),
-               hash_tree_root(eth1_data),
-               hash_tree_root(graffiti),
-               hash_tree_root(validator_changes.proposer_slashings),
-               hash_tree_root(validator_changes.electra_attester_slashings),
-               hash_tree_root(
-                 List[electra.Attestation, Limit MAX_ATTESTATIONS](
-                   attestations)),
-               hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
-               hash_tree_root(validator_changes.voluntary_exits),
-               hash_tree_root(sync_aggregate),
-               execution_payload_root.get,
-               hash_tree_root(validator_changes.bls_to_execution_changes),
-               hash_tree_root(kzg_commitments.get),
-               hash_tree_root(execution_requests)
-            ])
-          else:
-            raiseAssert "Attempt to use non-Fulu payload with post-Electra state"
-        else:
-          static: raiseAssert "Unreachable"
+            raiseAssert "Attempt to use non-Electra payload with post-Deneb state"
 
     state.`kind Data`.root = hash_tree_root(state.`kind Data`.data)
     blck.`kind Data`.state_root = state.`kind Data`.root
-
     ok((blck: blck, rewards: res.get))
 
-  # Special template for fulu that includes signature parameter
   template makeBeaconBlockFulu(
       kind: untyped
   ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
-    # Create the block using partialBeaconBlock with signature
     var blck =
       ForkedBeaconBlock.init(
         partialBeaconBlock(
           cfg, state.`kind Data`, proposer_index, randao_reveal, eth1_data,
           graffiti, attestations, deposits, validator_changes, sync_aggregate,
-          executionPayload, execution_requests, execution_payload_header_signature))
+          executionPayload, execution_requests, signed_execution_payload_header))
 
     let res = process_block(
       cfg, state.`kind Data`.data, blck.`kind Data`.asSigVerified(),
@@ -667,37 +590,28 @@ proc makeBeaconBlockWithRewards*(
       rollback(state)
       return err(res.error())
 
-    # Override for Builder API (same logic as makeBeaconBlock)
+    # Builder API logic for Fulu
     if transactions_root.isSome and execution_payload_root.isSome:
       withState(state):
         when consensusFork == ConsensusFork.Fulu:
-          debugFuluComment "verify (again) that this is what builder API needs"
           when executionPayload is fulu.ExecutionPayloadForSigning:
-            forkyState.data.latest_block_header.body_root = hash_tree_root(
-              [hash_tree_root(randao_reveal),
-               hash_tree_root(eth1_data),
-               hash_tree_root(graffiti),
-               hash_tree_root(validator_changes.proposer_slashings),
-               hash_tree_root(validator_changes.electra_attester_slashings),
-               hash_tree_root(
-                 List[electra.Attestation, Limit MAX_ATTESTATIONS](
-                   attestations)),
-               hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
-               hash_tree_root(validator_changes.voluntary_exits),
-               hash_tree_root(sync_aggregate),
-               execution_payload_root.get,
-               hash_tree_root(validator_changes.bls_to_execution_changes),
-               hash_tree_root(kzg_commitments.get),
-               hash_tree_root(execution_requests)
-            ])
+            forkyState.data.latest_block_header.body_root = hash_tree_root([
+              hash_tree_root(randao_reveal), hash_tree_root(eth1_data), hash_tree_root(graffiti),
+              hash_tree_root(validator_changes.proposer_slashings),
+              hash_tree_root(validator_changes.electra_attester_slashings),
+              hash_tree_root(List[electra.Attestation, Limit MAX_ATTESTATIONS](attestations)),
+              hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
+              hash_tree_root(validator_changes.voluntary_exits), hash_tree_root(sync_aggregate),
+              execution_payload_root.get, hash_tree_root(validator_changes.bls_to_execution_changes),
+              hash_tree_root(kzg_commitments.get), hash_tree_root(execution_requests)])
           else:
-            raiseAssert "Attempt to use non-Fulu payload with post-Electra state"
+            raiseAssert "Attempt to use non-Fulu payload with Fulu state"
 
     state.`kind Data`.root = hash_tree_root(state.`kind Data`.data)
     blck.`kind Data`.state_root = state.`kind Data`.root
-
     ok((blck: blck, rewards: res.get))
 
+  # Dispatch based on payload fork
   const payloadFork = typeof(executionPayload).kind
   when payloadFork == ConsensusFork.Bellatrix:
     case state.kind
@@ -723,6 +637,108 @@ proc makeBeaconBlockWithRewards*(
     else: raiseAssert "Attempt to use Fulu payload with non-Fulu state"
   else:
     {.error: "Unsupported fork".}
+
+proc makeBeaconBlockWithRewards(
+    cfg: RuntimeConfig,
+    state: var ForkedHashedBeaconState,
+    proposer_index: ValidatorIndex,
+    randao_reveal: ValidatorSig,
+    eth1_data: Eth1Data,
+    graffiti: GraffitiBytes,
+    attestations: seq[phase0.Attestation] | seq[electra.Attestation],
+    deposits: seq[Deposit],
+    validator_changes: BeaconBlockValidatorChanges,
+    sync_aggregate: SyncAggregate,
+    executionPayload: ForkyExecutionPayloadForSigning,
+    rollback: RollbackForkedHashedProc,
+    cache: var StateCache,
+    verificationFlags: UpdateFlags,
+    transactions_root: Opt[Eth2Digest],
+    execution_payload_root: Opt[Eth2Digest],
+    kzg_commitments: Opt[KzgCommitments],
+    execution_requests: ExecutionRequests):  # ← No signed_execution_payload_header
+    Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
+  ## Create a block for the given state. Pre-EIP-7732 version (supports Phase0 through Electra).
+
+  template makeBeaconBlock(
+      kind: untyped
+  ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
+    var blck =
+      ForkedBeaconBlock.init(
+        partialBeaconBlock(
+          cfg, state.`kind Data`, proposer_index, randao_reveal, eth1_data,
+          graffiti, attestations, deposits, validator_changes, sync_aggregate,
+          executionPayload, execution_requests))
+
+    let res = process_block(
+      cfg, state.`kind Data`.data, blck.`kind Data`.asSigVerified(),
+      verificationFlags, cache)
+    if res.isErr:
+      rollback(state)
+      return err(res.error())
+
+    # Builder API logic
+    if transactions_root.isSome and execution_payload_root.isSome:
+      withState(state):
+        when consensusFork < ConsensusFork.Deneb:
+          discard
+        elif consensusFork == ConsensusFork.Deneb:
+          forkyState.data.latest_execution_payload_header.transactions_root = transactions_root.get
+          when executionPayload is deneb.ExecutionPayloadForSigning:
+            forkyState.data.latest_block_header.body_root = hash_tree_root([
+              hash_tree_root(randao_reveal), hash_tree_root(eth1_data), hash_tree_root(graffiti),
+              hash_tree_root(validator_changes.proposer_slashings),
+              hash_tree_root(validator_changes.phase0_attester_slashings),
+              hash_tree_root(List[phase0.Attestation, Limit MAX_ATTESTATIONS](attestations)),
+              hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
+              hash_tree_root(validator_changes.voluntary_exits), hash_tree_root(sync_aggregate),
+              execution_payload_root.get, hash_tree_root(validator_changes.bls_to_execution_changes),
+              hash_tree_root(kzg_commitments.get)])
+          else:
+            raiseAssert "Attempt to use non-Deneb payload with post-Deneb state"
+        elif consensusFork == ConsensusFork.Electra:
+          forkyState.data.latest_execution_payload_header.transactions_root = transactions_root.get
+          when executionPayload is electra.ExecutionPayloadForSigning:
+            forkyState.data.latest_block_header.body_root = hash_tree_root([
+              hash_tree_root(randao_reveal), hash_tree_root(eth1_data), hash_tree_root(graffiti),
+              hash_tree_root(validator_changes.proposer_slashings),
+              hash_tree_root(validator_changes.electra_attester_slashings),
+              hash_tree_root(List[electra.Attestation, Limit MAX_ATTESTATIONS_ELECTRA](attestations)),
+              hash_tree_root(List[Deposit, Limit MAX_DEPOSITS](deposits)),
+              hash_tree_root(validator_changes.voluntary_exits), hash_tree_root(sync_aggregate),
+              execution_payload_root.get, hash_tree_root(validator_changes.bls_to_execution_changes),
+              hash_tree_root(kzg_commitments.get), hash_tree_root(execution_requests)])
+          else:
+            raiseAssert "Attempt to use non-Electra payload with post-Deneb state"
+
+    state.`kind Data`.root = hash_tree_root(state.`kind Data`.data)
+    blck.`kind Data`.state_root = state.`kind Data`.root
+    ok((blck: blck, rewards: res.get))
+
+  # This version doesn't support Fulu
+  const payloadFork = typeof(executionPayload).kind
+  when payloadFork == ConsensusFork.Bellatrix:
+    case state.kind
+    of ConsensusFork.Phase0:    makeBeaconBlock(phase0)
+    of ConsensusFork.Altair:    makeBeaconBlock(altair)
+    of ConsensusFork.Bellatrix: makeBeaconBlock(bellatrix)
+    else: raiseAssert "Attempt to use Bellatrix payload with post-Bellatrix state"
+  elif payloadFork == ConsensusFork.Capella:
+    case state.kind
+    of ConsensusFork.Capella:   makeBeaconBlock(capella)
+    else: raiseAssert "Attempt to use Capella payload with non-Capella state"
+  elif payloadFork == ConsensusFork.Deneb:
+    case state.kind
+    of ConsensusFork.Deneb:     makeBeaconBlock(deneb)
+    else: raiseAssert "Attempt to use Deneb payload with non-Deneb state"
+  elif payloadFork == ConsensusFork.Electra:
+    case state.kind
+    of ConsensusFork.Electra:   makeBeaconBlock(electra)
+    else: raiseAssert "Attempt to use Electra payload with non-Electra state"
+  elif payloadFork == ConsensusFork.Fulu:
+    err("Fulu blocks require SignedExecutionPayloadHeader - use the EIP-7732 overload")
+  else:
+    {.error: "Unsupported fork".}
     
 proc makeBeaconBlock*(
     cfg: RuntimeConfig, state: var ForkedHashedBeaconState,
@@ -746,7 +762,7 @@ proc makeBeaconBlock*(
       attestations, deposits, validator_changes, sync_aggregate,
       executionPayload, rollback, cache, verificationFlags,
       transactions_root, execution_payload_root, kzg_commitments,
-      execution_requests,default(ValidatorSig))
+      execution_requests)
   ok(blockAndRewards.blck)
 
 proc makeBeaconBlock*(

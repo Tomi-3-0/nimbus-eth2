@@ -34,13 +34,13 @@ import
     spec_cache, blockchain_dag, block_clearance, attestation_pool,
     sync_committee_msg_pool, validator_change_pool, consensus_manager,
     common_tools],
-  ../el/el_manager,
+  ../el/[el_manager, engine_api_conversions],
   ../networking/eth2_network,
   ../sszdump, ../sync/sync_manager,
   ../gossip_processing/block_processor,
   ".."/[conf, beacon_clock, beacon_node],
   "."/[
-    keystore_management, slashing_protection, validator_duties, validator_pool],
+    keystore_management, slashing_protection, validator_duties, validator_pool, epbs_builder],
   ".."/spec/mev/[rest_electra_mev_calls, rest_fulu_mev_calls]
 
 from std/sequtils import mapIt
@@ -399,11 +399,18 @@ proc getExecutionPayload(
         node.getFeeRecipient(pubkey.get().toPubKey(), validator_index, epoch)
 
     beaconHead = node.attestationPool[].getBeaconHead(head)
-    executionHead = withState(proposalState[]):
-      when consensusFork >= ConsensusFork.Bellatrix:
-        forkyState.data.latest_execution_payload_header.block_hash
-      else:
-        (static(default(Eth2Digest)))
+  let executionHead = withState(proposalState[]):
+    let result = when consensusFork >= ConsensusFork.Bellatrix and consensusFork < ConsensusFork.Fulu:
+      forkyState.data.latest_execution_payload_header.block_hash
+    elif consensusFork >= ConsensusFork.Fulu:
+      forkyState.data.latest_block_hash
+    else:
+      default(Eth2Digest)
+    result
+  info "DEBUG execution head",
+    executionHead = shortLog(executionHead),
+    stateKind = $proposalState[].kind
+  let
     latestSafe = beaconHead.safeExecutionBlockHash
     latestFinalized = beaconHead.finalizedExecutionBlockHash
     timestamp = withState(proposalState[]):
@@ -442,30 +449,15 @@ func partialBeaconBlock*(
     sync_aggregate: SyncAggregate,
     execution_payload: fulu.ExecutionPayloadForSigning,
     execution_requests: ExecutionRequests,
-    execution_payload_header_signature: ValidatorSig
+    signed_execution_payload_header: fulu.SignedExecutionPayloadHeader
 ): fulu.BeaconBlock =
   
-  let executionPayloadHeader = fulu.ExecutionPayloadHeader(
-    parent_block_hash: execution_payload.executionPayload.parent_hash,
-    parent_block_root: state.latest_block_root,
-    block_hash: execution_payload.executionPayload.block_hash,
-    gas_limit: execution_payload.executionPayload.gas_limit,
-    builder_index: proposer_index.uint64,
-    slot: state.data.slot,
-    value: 0.Gwei,
-    blob_kzg_commitments_root:
-      hash_tree_root(execution_payload.blobsBundle.commitments)
-  )
-  
-  let signedHeader = fulu.SignedExecutionPayloadHeader(
-    message: executionPayloadHeader,
-    signature: execution_payload_header_signature
-  )
+  let parent_block_root = hash_tree_root(state.data.latest_block_header)
   
   fulu.BeaconBlock(
     slot: state.data.slot,
     proposer_index: proposer_index.uint64,
-    parent_root: state.latest_block_root,
+    parent_root: parent_block_root,
     body: fulu.BeaconBlockBody(
       randao_reveal: randao_reveal,
       eth1_data: eth1_data,
@@ -478,14 +470,13 @@ func partialBeaconBlock*(
       voluntary_exits: validator_changes.voluntary_exits,
       sync_aggregate: sync_aggregate,
       bls_to_execution_changes: validator_changes.bls_to_execution_changes,
-      signed_execution_payload_header: signedHeader,
+      signed_execution_payload_header: signed_execution_payload_header,
       payload_attestations:
         List[PayloadAttestation, Limit MAX_PAYLOAD_ATTESTATIONS](@[])
     )
   )
 
-# 2. Complete makeBeaconBlockWithRewards function
-proc makeBeaconBlockWithRewards*(
+proc makeBeaconBlockWithRewards(
     cfg: RuntimeConfig,
     state: var ForkedHashedBeaconState,
     proposer_index: ValidatorIndex,
@@ -504,7 +495,7 @@ proc makeBeaconBlockWithRewards*(
     execution_payload_root: Opt[Eth2Digest],
     kzg_commitments: Opt[KzgCommitments],
     execution_requests: ExecutionRequests,
-    execution_payload_header_signature: ValidatorSig
+    signed_execution_payload_header: fulu.SignedExecutionPayloadHeader
 ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
   ## Create a block for the given state. The latest block applied to it will
   ## be used for the parent_root value, and the slot will be take from
@@ -621,7 +612,6 @@ proc makeBeaconBlockWithRewards*(
 
     ok((blck: blck, rewards: res.get))
 
-  # Special template for fulu that includes signature parameter
   template makeBeaconBlockFulu(
       kind: untyped
   ): Result[tuple[blck: ForkedBeaconBlock, rewards: BlockRewards], cstring] =
@@ -630,7 +620,7 @@ proc makeBeaconBlockWithRewards*(
         partialBeaconBlock(
           cfg, state.`kind Data`, proposer_index, randao_reveal, eth1_data,
           graffiti, attestations, deposits, validator_changes, sync_aggregate,
-          executionPayload, execution_requests, execution_payload_header_signature))
+          executionPayload, execution_requests, signed_execution_payload_header))
 
     let res = process_block(
       cfg, state.`kind Data`.data, blck.`kind Data`.asSigVerified(),
@@ -805,9 +795,13 @@ proc makeBeaconBlockForHeadAndSlot*(
       execution_requests_buffer
     else:
       default(ExecutionRequests)
+  
+  when PayloadType.kind == ConsensusFork.Fulu:
+    node.payloadCache[slot] = payload
+    node.executionRequestsCache[slot] = execution_requests_actual
 
   # Generate execution payload header signature for fulu blocks
-  let execution_payload_header_signature =
+  let signed_execution_payload_header =
     when PayloadType.kind == ConsensusFork.Fulu:
       withState(state[]):
         when consensusFork >= ConsensusFork.Fulu: 
@@ -821,12 +815,12 @@ proc makeBeaconBlockForHeadAndSlot*(
           if validator.kind == ValidatorKind.Local:
             let executionPayloadHeader = fulu.ExecutionPayloadHeader(
               parent_block_hash: payload.executionPayload.parent_hash,
-              parent_block_root: hash_tree_root(forkyState.data.latest_block_header),
+              parent_block_root: head.root,
               block_hash: payload.executionPayload.block_hash,
               gas_limit: payload.executionPayload.gas_limit,
               builder_index: validator_index.uint64,
-              slot: forkyState.data.slot,
-              value: 0.Gwei,
+              slot: slot,
+              value: payload.blockValue.truncate(uint64).Gwei,
               blob_kzg_commitments_root:
                 hash_tree_root(payload.blobsBundle.commitments)
             )
@@ -843,14 +837,17 @@ proc makeBeaconBlockForHeadAndSlot*(
               forkyState.data,
               validator.data.privateKey
             )
-            
-            headerSignature.toValidatorSig()
+
+            fulu.SignedExecutionPayloadHeader(
+              message: executionPayloadHeader,
+              signature: headerSignature.toValidatorSig()
+            )
           else:
             return err("unable to obtain validator signature")
         else:
           return err("Fulu payload with non-fulu state - fork transition not complete")
     else:
-      default(ValidatorSig)
+      default(fulu.SignedExecutionPayloadHeader)
 
   let res = makeBeaconBlockWithRewards(
       node.dag.cfg,
@@ -871,7 +868,7 @@ proc makeBeaconBlockForHeadAndSlot*(
       execution_payload_root = execution_payload_root,
       kzg_commitments = kzg_commitments,
       execution_requests = execution_requests_actual,
-      execution_payload_header_signature = execution_payload_header_signature
+      signed_execution_payload_header = signed_execution_payload_header
     ).mapErr do (error: cstring) -> string:
     beacon_block_production_errors.inc()
     warn "Cannot create block for proposal",
@@ -1521,52 +1518,21 @@ proc proposeBlockAux(
           res.get()
       signedBlock = consensusFork.SignedBeaconBlock(
         message: forkyBlck, signature: signature, root: blockRoot)
-
-    when consensusFork == ConsensusFork.Fulu:
-      # EIP-7732: blob commitments come from execution payload
-      let blobSidecarsEIP7732 = 
-        if engineBid.blobsBundle.commitments.len > 0:
-          var commitmentsList: KzgCommitments
-          for commitment in engineBid.blobsBundle.commitments:
-            doAssert commitmentsList.add(commitment)
-          
-          create_blob_sidecars(
-            signedBlock,
-            engineBid.blobsBundle.blobs,
-            commitmentsList,
-            engineBid.blobsBundle.proofs)
+      blobsOpt =
+        when consensusFork >= ConsensusFork.Deneb and 
+          consensusFork < ConsensusFork.Fulu:
+          Opt.some(signedBlock.create_blob_sidecars(
+            engineBid.blobsBundle.proofs, engineBid.blobsBundle.blobs))
         else:
-          newSeq[BlobSidecarEIP7732]()
-      
-      let newBlockRef = (
-        await node.router.routeSignedBeaconBlock(
-          signedBlock, 
-          Opt.some(blobSidecarsEIP7732),
+          Opt.none(seq[BlobSidecar])
+      newBlockRef = (
+        await node.router.routeSignedBeaconBlock(signedBlock, blobsOpt,
           checkValidator = false)
       ).valueOr:
         return head # Errors logged in router
-    elif consensusFork >= ConsensusFork.Deneb:
-      # Deneb/Electra: blob commitments are in the block
-      let blobSidecars = signedBlock.create_blob_sidecars(
-        engineBid.blobsBundle.proofs,
-        engineBid.blobsBundle.blobs)
-      
-      let newBlockRef = (
-        await node.router.routeSignedBeaconBlock(
-          signedBlock,
-          Opt.some(blobSidecars),
-          checkValidator = false)
-      ).valueOr:
-        return head # Errors logged in router
-    else:
-      # Pre-Deneb: no blobs
-      let newBlockRef = (
-        await node.router.routeSignedBeaconBlock(
-          signedBlock,
-          Opt.none(seq[deneb.BlobSidecar]),
-          checkValidator = false)
-      ).valueOr:
-        return head # Errors logged in router
+
+    if newBlockRef.isNone():
+      return head # Validation errors logged in router
 
     notice "Block proposed",
       blockRoot = shortLog(blockRoot), blck = shortLog(forkyBlck),
@@ -1575,6 +1541,311 @@ proc proposeBlockAux(
     beacon_blocks_proposed.inc()
 
     return newBlockRef.get()
+
+proc proposeBlockEIP7732(
+    node: BeaconNode,
+    validator: AttachedValidator,
+    validator_index: ValidatorIndex,
+    head: BlockRef,
+    slot: Slot,
+    randao: ValidatorSig,
+    fork: Fork,
+    genesis_validators_root: Eth2Digest
+): Future[BlockRef] {.async: (raises: [CancelledError]).} =
+  let graffitiBytes = node.getGraffitiBytes(validator)
+  
+  # Step 1: Run builder bids and local payload creation in parallel
+  let
+    builderBidsFut = try:
+      node.gatherBuilderBids(slot, head.root)
+    except CancelledError as e:
+      raise e
+    except Exception as e:
+      warn "Failed to gather builder bids", error = e.msg, slot, validator_index
+      let fut = newFuture[seq[SignedExecutionPayloadHeader]]("empty-bids")
+      fut.complete(@[])
+      fut
+    
+    stateRef = newClone(node.dag.headState)
+  
+  # Update state to target slot 
+  var cache = StateCache()
+  if not node.dag.updateState(
+      stateRef[], head.atSlot(slot).toBlockSlotId().expect("valid slot"), 
+      false, cache, node.dag.updateFlags):
+    warn "Failed to update state to target slot", slot, head = shortLog(head)
+    return head
+  
+  let localPayloadFut = getExecutionPayload(
+    fulu.ExecutionPayloadForSigning,
+    node, head, stateRef, validator_index)
+
+  # Wait for both to complete
+  await allFutures(builderBidsFut, localPayloadFut)
+  
+  # Process results - handle failures gracefully
+  let bids = 
+    if builderBidsFut.completed:
+      try:
+        builderBidsFut.value
+      except CatchableError as e:
+        warn "Builder bids future failed", error = e.msg
+        @[]
+    else:
+      warn "Builder bids future incomplete"
+      @[]
+
+  let localPayload = 
+    if localPayloadFut.completed:
+      try:
+        let result = localPayloadFut.value
+        if result.isSome:
+          result
+        else:
+          warn "Local payload creation returned none", slot, validator_index
+          Opt.none(fulu.ExecutionPayloadForSigning)
+      except CatchableError as e:
+        warn "Local payload creation failed", error = e.msg, slot, validator_index
+        Opt.none(fulu.ExecutionPayloadForSigning)
+    else:
+      warn "Local payload future incomplete", slot, validator_index
+      Opt.none(fulu.ExecutionPayloadForSigning)
+
+  # Step 2: Check if we have any valid options
+  if localPayload.isNone and bids.len == 0:
+    warn "No local payload and no external builder bids available", slot, validator_index
+    return head
+
+  # Step 3: Create local bid if we have local payload
+  var 
+    localSignedHeader: Opt[fulu.SignedExecutionPayloadHeader]
+    localValue = 0.u256
+
+  if localPayload.isSome:
+    # Create local header using payload's parent hash (not state's latest_block_hash)
+    let localHeader = fulu.ExecutionPayloadHeader(
+      parent_block_hash: localPayload.get().executionPayload.parent_hash,
+      parent_block_root: head.root,
+      block_hash: localPayload.get().executionPayload.block_hash,
+      gas_limit: localPayload.get().executionPayload.gas_limit,
+      builder_index: validator_index.uint64,
+      slot: slot,
+      value: Gwei(localPayload.get().blockValue.div(1_000_000_000).truncate(uint64)),
+      blob_kzg_commitments_root: hash_tree_root(localPayload.get().blobsBundle.commitments)
+    )
+    
+    # Sign the header
+    let consensusFork = node.dag.cfg.consensusForkAtEpoch(slot.epoch)
+    
+    if consensusFork >= ConsensusFork.Fulu and validator.kind == ValidatorKind.Local:
+      try:
+        let 
+          domain = get_domain(fork, DOMAIN_BEACON_BUILDER, slot.epoch, genesis_validators_root)
+          signing_root = compute_signing_root(localHeader, domain)
+          sig = blsSign(validator.data.privateKey, signing_root.data)
+        
+        localSignedHeader = Opt.some(fulu.SignedExecutionPayloadHeader(
+          message: localHeader,
+          signature: sig.toValidatorSig()
+        ))
+        localValue = localPayload.get().blockValue
+        
+        debug "Local header created and signed", slot, validator_index
+        
+      except CatchableError as e:
+        warn "Failed to sign local header", error = e.msg, slot, validator_index
+    else:
+      warn "Cannot sign local header", 
+        consensusFork = consensusFork, 
+        validatorKind = validator.kind,
+        slot = slot
+
+  # Step 4: Select winning bid (compare all available bids)
+  var 
+    winningBid: fulu.SignedExecutionPayloadHeader
+    winningValue = 0.u256
+    isLocalBid = false
+    hasValidBid = false
+
+  # Consider local bid first
+  if localSignedHeader.isSome:
+    winningBid = localSignedHeader.get()
+    winningValue = localValue
+    isLocalBid = true
+    hasValidBid = true
+
+  # Compare with external bids
+  for bid in bids:
+    let bidValueInWei = bid.message.value.uint64.u256 * 1_000_000_000.u256
+    if bidValueInWei > winningValue:
+      winningBid = bid
+      winningValue = bidValueInWei
+      isLocalBid = false
+      hasValidBid = true
+
+  # Ensure we have a valid bid
+  if not hasValidBid:
+    warn "No valid bids available after selection", slot, validator_index
+    return head
+
+  # Step 5: Broadcast winning header if it's local
+  if isLocalBid and localSignedHeader.isSome:
+    let broadcastResult = await node.network.broadcastExecutionPayloadHeader(winningBid)
+    if broadcastResult.isErr:
+      warn "Failed to broadcast execution payload header", 
+        error = broadcastResult.error, slot, validator_index
+
+  # Step 6: Create beacon block with winning bid
+  let validatorChanges = withState(stateRef[]):
+    node.validatorChangePool[].getBeaconBlockValidatorChanges(
+      node.dag.cfg, forkyState.data)
+
+  # EIP-7732: Block creation differs for local vs external builders
+  let payloadForBlock = 
+    if isLocalBid and localPayload.isSome:
+      # Local builder: we have the full payload
+      localPayload.get()
+    else:
+      # External builder: block contains ONLY header, no payload yet
+      var emptyPayload = default(fulu.ExecutionPayloadForSigning)
+      emptyPayload.executionPayload.parent_hash = winningBid.message.parent_block_hash
+      emptyPayload.executionPayload.block_hash = winningBid.message.block_hash
+      emptyPayload.executionPayload.gas_limit = winningBid.message.gas_limit
+      emptyPayload.blockValue = winningValue
+      emptyPayload
+
+  let beaconBlock = makeBeaconBlockWithRewards(
+    node.dag.cfg,
+    stateRef[],
+    validator_index,
+    randao,
+    Eth1Data(),
+    graffitiBytes,
+    node.attestationPool[].getElectraAttestationsForBlock(stateRef[], cache),
+    @[],
+    validatorChanges,
+    node.syncCommitteeMsgPool[].produceSyncAggregate(head.bid, slot),
+    payloadForBlock,
+    noRollback,
+    cache,
+    verificationFlags = {},
+    transactions_root = Opt.none(Eth2Digest),
+    execution_payload_root = Opt.none(Eth2Digest),
+    kzg_commitments = Opt.none(KzgCommitments),
+    execution_requests = default(ExecutionRequests),
+    winningBid
+  )
+  
+  if beaconBlock.isErr:
+    warn "Failed to create beacon block", error = beaconBlock.error, slot, validator_index
+    return head
+
+  # Step 7: Sign and broadcast beacon block
+  let forkedBlock = beaconBlock.get().blck
+  
+  case forkedBlock.kind
+  of ConsensusFork.Fulu:
+    let fuluBlock = forkedBlock.fuluData
+    let
+      blockRoot = hash_tree_root(fuluBlock)
+      signingRoot = compute_block_signing_root(
+        fork, genesis_validators_root, slot, blockRoot)
+      
+      notSlashable = node.attachedValidators
+        .slashingProtection
+        .registerBlock(validator_index, validator.pubkey, slot, signingRoot)
+    
+    if notSlashable.isErr:
+      warn "Slashing protection activated for EIP-7732 block",
+        blockRoot = shortLog(blockRoot),
+        slot = slot,
+        validator_index = validator_index,
+        existingProposal = notSlashable.error
+      return head
+    
+    let signature = block:
+      let res = await validator.getBlockSignature(
+        fork, genesis_validators_root, slot, blockRoot, forkedBlock)
+      if res.isErr():
+        warn "Unable to sign EIP-7732 block", error_msg = res.error(), slot, validator_index
+        return head
+      res.get()
+      
+    let signedBlock = fulu.SignedBeaconBlock(
+      message: fuluBlock, 
+      signature: signature, 
+      root: blockRoot)
+    
+    # Step 8: Create blob sidecars for EIP-7732 (commitments from payload, not block)
+    let blobSidecarsEIP7732 = 
+      if isLocalBid and localPayload.isSome and localPayload.get().blobsBundle.commitments.len > 0:
+        var commitmentsList: KzgCommitments
+        for commitment in localPayload.get().blobsBundle.commitments:
+          doAssert commitmentsList.add(commitment)
+        
+        create_blob_sidecars(
+          signedBlock,
+          localPayload.get().blobsBundle.blobs,
+          commitmentsList,
+          localPayload.get().blobsBundle.proofs)
+      else:
+        newSeq[BlobSidecarEIP7732]()
+    
+    # Route the signed block with blob sidecars
+    let newBlockRef = (
+      await node.router.routeSignedBeaconBlock(
+        signedBlock, 
+        Opt.some(blobSidecarsEIP7732),
+        checkValidator = false)
+    ).valueOr:
+      warn "Failed to route EIP-7732 signed block", slot, validator_index
+      return head
+    
+    # Step 9: Handle payload envelope based on builder type
+    if isLocalBid and localPayload.isSome:
+      # LOCAL BUILDER: We are the builder, so we broadcast the envelope
+      node.payloadCache[slot] = localPayload.get()
+      node.executionRequestsCache[slot] = default(ExecutionRequests)
+      
+      # Schedule payload envelope broadcast for Phase 3 (4 seconds)
+      asyncSpawn node.broadcastLocalPayloadEnvelope(
+        slot, blockRoot, validator_index)
+        
+      info "Local builder: scheduled payload envelope broadcast",
+        slot, validator_index, blockRoot = shortLog(blockRoot)
+    else:
+      # EXTERNAL BUILDER: Not our responsibility to broadcast envelope
+      info "External builder selected: envelope broadcast delegated",
+        builderIndex = winningBid.message.builder_index,
+        slot, blockRoot = shortLog(blockRoot)
+    
+    # Log success with detailed information
+    let bidSource = if isLocalBid: "local" else: "external"
+    let bidCount = bids.len
+    let hasLocalPayload = localPayload.isSome
+    
+    notice "EIP-7732 block proposed",
+      blockRoot = shortLog(blockRoot),
+      slot = slot,
+      validator_index = validator_index,
+      bidSource = bidSource,
+      bidValue = winningValue,
+      externalBidCount = bidCount,
+      hasLocalPayload = hasLocalPayload
+    
+    if not isLocalBid:
+      info "Using external builder bid",
+        builderIndex = winningBid.message.builder_index,
+        bidValue = winningValue,
+        localPayloadFailed = localPayload.isNone
+    
+    beacon_blocks_proposed.inc()
+    return newBlockRef.get()
+    
+  else:
+    warn "Unexpected fork for EIP-7732 block", 
+      fork = forkedBlock.kind, slot, validator_index
+    return head
   
 proc proposeBlock(
     node: BeaconNode,
@@ -1610,13 +1881,16 @@ proc proposeBlock(
         genesis_validators_root, node.config.localBlockValueBoost)
 
   return withConsensusFork(node.dag.cfg.consensusForkAtEpoch(slot.epoch)):
-    when consensusFork >= ConsensusFork.Electra:
+    when consensusFork >= ConsensusFork.Fulu:
+      await proposeBlockEIP7732(
+        node, validator, validator_index, head, slot, randao, fork,
+        genesis_validators_root)
+    elif consensusFork >= ConsensusFork.Electra:
       proposeBlockContinuation(
         consensusFork.SignedBlindedBeaconBlock,
         consensusFork.ExecutionPayloadForSigning)
     else:
-      # Pre-Deneb MEV is not supported; this signals that, because it triggers
-      # intentional SignedBlindedBeaconBlock/ExecutionPayload mismatches.
+      # Pre-Deneb MEV is not supported
       proposeBlockContinuation(
         electra_mev.SignedBlindedBeaconBlock,
         max(ConsensusFork.Bellatrix, consensusFork).ExecutionPayloadForSigning)
